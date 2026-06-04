@@ -1,0 +1,21 @@
+export declare enum OrderStatus {
+    DRAFT = "draft",
+    PENDING_APPROVAL = "pending_approval",
+    SUBMITTED = "submitted",
+    COUNTER_OFFER = "counter_offer",
+    ACCEPTED = "accepted",
+    BACK_ORDERED = "back_ordered",
+    SHIPPED = "shipped",
+    FAILED_DELIVERY = "failed_delivery",
+    ON_HOLD = "on_hold",
+    RECEIVED_PENDING_QC = "received_pending_qc",
+    DELIVERED = "delivered",
+    PARTIALLY_DELIVERED = "partially_delivered",
+    DISPUTED = "disputed",
+    RETURN_REQUESTED = "return_requested",
+    RETURN_APPROVED = "return_approved",
+    RETURN_IN_TRANSIT = "return_in_transit",
+    RETURN_RECEIVED = "return_received",
+    CREDIT_ISSUED = "credit_issued",
+    CANCELLED = "cancelled"
+}

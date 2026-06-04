@@ -1,0 +1,109 @@
+import './telemetry'; // must be first — boots OTel before NestJS
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { getQueueToken } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import helmet from 'helmet';
+import * as express from 'express';
+import { createBullBoard } from '@bull-board/api';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { ExpressAdapter as BullBoardExpressAdapter } from '@bull-board/express';
+import { AppModule } from './app.module';
+import { AI_RECOMMENDATIONS_QUEUE } from './ai/ai.constants';
+import { AUDIT_QUEUE } from './audit/audit.constants';
+import { WEBHOOK_DELIVERY_QUEUE } from './webhooks/webhook.constants';
+
+async function bootstrap() {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const isProd = process.env.NODE_ENV === 'production';
+
+  // ── Security headers ───────────────────────────────────────────────────────
+  app.use(
+    helmet({
+      contentSecurityPolicy: isProd,
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  // ── CORS ───────────────────────────────────────────────────────────────────
+  app.enableCors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
+
+  // ── Body size limit ────────────────────────────────────────────────────────
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+  // ── Validation ─────────────────────────────────────────────────────────────
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
+
+  // ── Global prefix ──────────────────────────────────────────────────────────
+  app.setGlobalPrefix('api/v1');
+
+  // ── Bull Board — queue monitoring UI ──────────────────────────────────────
+  // Protected by BULL_BOARD_API_KEY — share only with ops/system-admin users.
+  // Accessible at /admin/queues regardless of NODE_ENV (skip in prod if unwanted).
+  const boardAdapter = new BullBoardExpressAdapter();
+  boardAdapter.setBasePath('/admin/queues');
+
+  createBullBoard({
+    queues: [
+      new BullMQAdapter(app.get<Queue>(getQueueToken(AI_RECOMMENDATIONS_QUEUE))),
+      new BullMQAdapter(app.get<Queue>(getQueueToken(AUDIT_QUEUE))),
+      new BullMQAdapter(app.get<Queue>(getQueueToken(WEBHOOK_DELIVERY_QUEUE))),
+    ],
+    serverAdapter: boardAdapter,
+    options: { uiConfig: { boardTitle: 'MediPulse Queues' } },
+  });
+
+  const bullBoardApiKey = process.env.BULL_BOARD_API_KEY;
+
+  app.use(
+    '/admin/queues',
+    (req: any, res: any, next: any) => {
+      const token = (req.headers['authorization'] ?? '').replace('Bearer ', '').trim();
+      if (!bullBoardApiKey || token !== bullBoardApiKey) {
+        res.status(401).json({ message: 'Unauthorized' });
+        return;
+      }
+      next();
+    },
+    boardAdapter.getRouter(),
+  );
+
+  // ── Swagger — dev only ─────────────────────────────────────────────────────
+  if (!isProd) {
+    const config = new DocumentBuilder()
+      .setTitle('MediPulse API')
+      .setDescription('AI-powered pharmacy management SaaS — development only')
+      .setVersion('1.0')
+      .addBearerAuth(
+        { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+        'access-token',
+      )
+      .build();
+    SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
+    console.log(`Swagger: http://localhost:${process.env.PORT || 3000}/docs`);
+    console.log(`Bull Board: http://localhost:${process.env.PORT || 3000}/admin/queues  (requires BULL_BOARD_API_KEY header)`);
+  }
+
+  // ── Graceful shutdown ──────────────────────────────────────────────────────
+  app.enableShutdownHooks();
+
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
+  console.log(`MediPulse API running on :${port} [${process.env.NODE_ENV ?? 'development'}]`);
+}
+
+bootstrap();

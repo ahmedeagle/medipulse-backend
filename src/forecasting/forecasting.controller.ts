@@ -1,0 +1,109 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Query,
+  UseGuards,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiBearerAuth,
+  ApiOperation,
+  ApiOkResponse,
+  ApiQuery,
+} from '@nestjs/swagger';
+import { DemandForecastingService } from './demand-forecasting.service';
+import { EoqService } from './eoq.service';
+import { DeadStockService } from '../inventory/dead-stock.service';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Role } from '../common/enums/role.enum';
+import { AuditRead } from '../audit/decorators/audit-read.decorator';
+
+@ApiTags('forecasting')
+@ApiBearerAuth('access-token')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(Role.PHARMACY_ADMIN)
+@Controller('forecasting')
+export class ForecastingController {
+  constructor(
+    private readonly forecastingSvc: DemandForecastingService,
+    private readonly eoqSvc: EoqService,
+    private readonly deadStockSvc: DeadStockService,
+  ) {}
+
+  @Get('demand')
+  @AuditRead('demand_forecast')
+  @ApiOperation({
+    summary: 'Get demand forecast for a product (7, 14, 30 day horizons)',
+    description:
+      'Uses Holt-Winters Double Exponential Smoothing on weekly consumption snapshots. ' +
+      'Returns forecast + confidence interval + trend direction per horizon. ' +
+      'Includes retrospective MAPE accuracy where available.',
+  })
+  @ApiQuery({ name: 'productId', required: true })
+  @ApiOkResponse()
+  getDemandForecast(
+    @CurrentUser() user: any,
+    @Query('productId', ParseUUIDPipe) productId: string,
+  ) {
+    return this.forecastingSvc.getForecasts(user.tenantId, productId);
+  }
+
+  @Get('eoq')
+  @AuditRead('procurement_schedule')
+  @ApiOperation({
+    summary: 'Get EOQ + procurement schedule for a product',
+    description:
+      'Returns Economic Order Quantity, Safety Stock (95% service level), ' +
+      'Reorder Point, optimal reorder-by date, and predicted stockout date. ' +
+      'Lead time is dynamic — taken from the recommended supplier\'s reliability score.',
+  })
+  @ApiQuery({ name: 'productId', required: true })
+  @ApiOkResponse()
+  async getEoqSchedule(
+    @CurrentUser() user: any,
+    @Query('productId', ParseUUIDPipe) productId: string,
+  ) {
+    const schedules = await this.eoqSvc.getScheduleMap(user.tenantId, [productId]);
+    return schedules.get(productId) ?? null;
+  }
+
+  @Get('dead-stock')
+  @AuditRead('dead_stock_analysis')
+  @ApiOperation({
+    summary: 'Dead stock analysis with financial impact and liquidation recommendations',
+    description:
+      'Identifies products with 8+ weeks of zero movement. ' +
+      'Calculates locked capital value per product. ' +
+      'Recommends: return_to_supplier | markdown | write_off | monitor. ' +
+      'Results ordered by urgency score.',
+  })
+  @ApiOkResponse()
+  getDeadStock(@CurrentUser() user: any) {
+    return this.deadStockSvc.analyzeDeadStock(user.tenantId);
+  }
+
+  @Get('dead-stock/summary')
+  @ApiOperation({ summary: 'Total dead stock value and count for this pharmacy' })
+  @ApiOkResponse({ description: '{ value: number, count: number }' })
+  getDeadStockSummary(@CurrentUser() user: any) {
+    return this.deadStockSvc.getTotalDeadStockValue(user.tenantId);
+  }
+
+  @Post('refresh')
+  @ApiOperation({
+    summary: 'Manually trigger forecast + EOQ refresh for this pharmacy',
+    description: 'Normally runs automatically (forecasts: Sunday 6am, EOQ: daily 3am). Use for testing.',
+  })
+  async refreshForecasts(@CurrentUser() user: any) {
+    const [forecastCount] = await Promise.all([
+      this.forecastingSvc.computeForecasts(user.tenantId),
+      this.eoqSvc.refreshForPharmacy(user.tenantId),
+    ]);
+    return { message: 'Refresh complete', forecastsComputed: forecastCount };
+  }
+}

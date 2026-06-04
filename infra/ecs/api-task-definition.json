@@ -1,0 +1,51 @@
+{
+  "family": "medipulse-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/MedipulseEcsExecutionRole",
+  "taskRoleArn":      "arn:aws:iam::ACCOUNT_ID:role/MedipulseApiTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "medipulse-api",
+      "image": "ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/medipulse-api:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3000, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",     "value": "production" },
+        { "name": "PORT",         "value": "3000" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL",       "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:DATABASE_URL::" },
+        { "name": "AUDIT_DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:AUDIT_DATABASE_URL::" },
+        { "name": "KC_URL",             "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:KC_URL::" },
+        { "name": "KC_REALM",           "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:KC_REALM::" },
+        { "name": "KC_CLIENT_ID",       "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:KC_CLIENT_ID::" },
+        { "name": "KC_CLIENT_SECRET",   "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:KC_CLIENT_SECRET::" },
+        { "name": "REDIS_HOST",         "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:REDIS_HOST::" },
+        { "name": "REDIS_PORT",         "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:REDIS_PORT::" },
+        { "name": "REDIS_PASSWORD",     "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:REDIS_PASSWORD::" },
+        { "name": "FRONTEND_URL",       "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:FRONTEND_URL::" },
+        { "name": "BULL_BOARD_API_KEY", "valueFrom": "arn:aws:secretsmanager:AWS_REGION:ACCOUNT_ID:secret:medipulse/production:BULL_BOARD_API_KEY::" }
+      ],
+      "healthCheck": {
+        "command":     ["CMD-SHELL", "wget -qO- http://localhost:3000/api/v1/health || exit 1"],
+        "interval":    30,
+        "timeout":     5,
+        "retries":     3,
+        "startPeriod": 15
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/medipulse/api",
+          "awslogs-region":        "AWS_REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

@@ -41,6 +41,47 @@ export class InventoryItem {
   @Column({ type: 'date', nullable: true })
   expiryDate: Date;
 
+  /** Lot / batch number from the supplier delivery */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  batchNumber: string;
+
+  /** Physical storage location, e.g. "Main Warehouse", "Cold Storage" */
+  @Column({ type: 'varchar', length: 100, nullable: true, default: 'Main Warehouse' })
+  location: string;
+
+  /** Purchase / cost price per unit (SAR) */
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  costPrice: number;
+
+  /** Retail selling price per unit (SAR) */
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  sellingPrice: number;
+
+  // ── Catalog linking (Phase 1) ───────────────────────────────────────────────
+  /**
+   * Status of this item's link to the central catalog (Product table).
+   *  - linked    : confident catalog match, master fields are sourced from catalog
+   *  - unlinked  : no catalog match yet (eligible for a CatalogRequest)
+   *  - suggested : matching engine found a probable match — awaits user confirm
+   *  - pending   : a CatalogRequest has been submitted and is under review
+   */
+  @Column({ type: 'varchar', length: 20, default: 'unlinked' })
+  linkStatus: 'linked' | 'unlinked' | 'suggested' | 'pending';
+
+  /** Confidence score 0..100 for the current catalog match. */
+  @Column({ type: 'decimal', precision: 5, scale: 2, nullable: true })
+  matchScore: number | null;
+
+  /**
+   * Structured explanation of why we linked this item to its catalog product —
+   * e.g. { signals: ['barcode_exact','manufacturer_match'], details: {...} }.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  matchExplanation: Record<string, any> | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastLinkedAt: Date | null;
+
   @Column({ type: 'timestamp', nullable: true })
   deletedAt: Date;
 

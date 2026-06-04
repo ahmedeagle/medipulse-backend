@@ -13,6 +13,7 @@ import {
   ParseUUIDPipe,
   UseInterceptors,
   UploadedFile,
+  ConflictException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
@@ -29,14 +30,17 @@ import {
 import { InventoryService } from './inventory.service';
 import { InventoryImportService } from './inventory-import.service';
 import { BarcodeLookupService } from './barcode-lookup.service';
+import { BatchesService } from './batches.service';
 import { CreateInventoryItemDto } from './dto/create-inventory-item.dto';
 import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CreateBatchDto } from './dto/create-batch.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
+import { CatalogMatchingService } from './catalog-matching.service';
 
 @ApiTags('inventory')
 @ApiBearerAuth('access-token')
@@ -47,6 +51,8 @@ export class InventoryController {
     private readonly inventoryService: InventoryService,
     private readonly importService: InventoryImportService,
     private readonly barcodeSvc: BarcodeLookupService,
+    private readonly batchesService: BatchesService,
+    private readonly matchingService: CatalogMatchingService,
   ) {}
 
   @Get('inventory')
@@ -119,6 +125,175 @@ export class InventoryController {
     return this.importService.importCsv(user.tenantId, file.buffer);
   }
 
+  // ── Batches (per-lot tracking) ───────────────────────────────────────────────
+
+  @Get('inventory/:id/batches')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'List all batches/lots for an inventory item (FEFO order)',
+    description: 'Returns active batches sorted by soonest expiry date for traceability and dispensing.',
+  })
+  @ApiOkResponse({ description: 'Array of ProductBatch records' })
+  @ApiNotFoundResponse({ description: 'Inventory item not found' })
+  listBatches(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.batchesService.listForItem(user.tenantId, id);
+  }
+
+  @Post('inventory/:id/batches')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Receive a new batch/lot for an inventory item',
+    description:
+      'Creates a new ProductBatch row, then recomputes the parent inventory item: ' +
+      'quantity = SUM(active batches), batchNumber/expiryDate/sellingPrice = soonest-expiry (FEFO) lot, ' +
+      'costPrice = weighted average across active lots.',
+  })
+  @ApiCreatedResponse({ description: '{ batch, inventory }' })
+  @ApiNotFoundResponse({ description: 'Inventory item not found' })
+  @ApiForbiddenResponse({ description: 'Item belongs to a different pharmacy' })
+  addBatch(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateBatchDto,
+  ) {
+    return this.batchesService.create(user.tenantId, user.id, id, dto);
+  }
+
+  @Post('batches/:batchId/adjust')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Adjust quantity of a single batch (stock-in or stock-out delta)',
+    description:
+      'delta > 0 increases the batch (e.g. correcting a count); ' +
+      'delta < 0 decreases it (e.g. wastage / manual stock-out). ' +
+      'Recomputes the parent inventory aggregate (quantity, FEFO batchNumber/expiry, weighted cost).',
+  })
+  @ApiOkResponse({ description: '{ batch, inventory }' })
+  @ApiNotFoundResponse({ description: 'Batch not found' })
+  @ApiForbiddenResponse({ description: 'Batch belongs to a different pharmacy' })
+  adjustBatch(
+    @CurrentUser() user: any,
+    @Param('batchId', ParseUUIDPipe) batchId: string,
+    @Body() body: { delta: number; reason?: string },
+  ) {
+    return this.batchesService.adjustQuantity(
+      user.tenantId,
+      user.id,
+      batchId,
+      Number(body?.delta) || 0,
+      body?.reason,
+    );
+  }
+
+  @Patch('batches/:batchId')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Update editable fields of a batch (metadata only)' })
+  @ApiOkResponse({ description: '{ batch, inventory }' })
+  @ApiNotFoundResponse({ description: 'Batch not found' })
+  updateBatch(
+    @CurrentUser() user: any,
+    @Param('batchId', ParseUUIDPipe) batchId: string,
+    @Body() body: {
+      batchNumber?: string;
+      expiryDate?: string | null;
+      location?: string | null;
+      costPerUnit?: number;
+      sellingPrice?: number;
+      notes?: string | null;
+    },
+  ) {
+    return this.batchesService.updateBatch(user.tenantId, user.id, batchId, body);
+  }
+
+  @Delete('batches/:batchId')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Soft-delete (depleted) a batch and recompute parent' })
+  @ApiOkResponse({ description: '{ inventory }' })
+  @ApiNotFoundResponse({ description: 'Batch not found' })
+  removeBatch(
+    @CurrentUser() user: any,
+    @Param('batchId', ParseUUIDPipe) batchId: string,
+  ) {
+    return this.batchesService.removeBatch(user.tenantId, user.id, batchId);
+  }
+
+  // ── Catalog linking ────────────────────────────────────────────────────────
+  @Get('inventory/:id/match-candidates')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Get AI-ranked catalog candidates for an inventory item',
+    description: 'Returns scored matches with explanation signals (barcode, name, manufacturer, strength, dosage form).',
+  })
+  @ApiOkResponse({ description: 'Array of MatchCandidate objects sorted by score desc' })
+  async getMatchCandidates(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('name')         name?: string,
+    @Query('nameAr')       nameAr?: string,
+    @Query('barcode')      barcode?: string,
+    @Query('manufacturer') manufacturer?: string,
+    @Query('strength')     strength?: string,
+    @Query('dosageForm')   dosageForm?: string,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit?: number,
+  ) {
+    const candidates = await this.matchingService.candidatesForInventoryItem(
+      user.tenantId,
+      id,
+      { name, nameAr, barcode, manufacturer, strength, dosageForm },
+      limit,
+    );
+    return candidates.map(c => ({
+      productId:    c.product.id,
+      product:      c.product,
+      score:        c.score,
+      signals:      c.signals,
+      reasons:      c.reasons,
+    }));
+  }
+
+  @Post('inventory/:id/link')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Link an inventory item to a specific catalog product' })
+  @ApiOkResponse({ description: 'Updated inventory item with linkStatus=linked' })
+  linkInventoryItem(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { productId: string; score?: number; signals?: string[]; reasons?: string[] },
+  ) {
+    return this.inventoryService.linkToProduct(
+      user.tenantId,
+      id,
+      body.productId,
+      { score: body.score, signals: body.signals, reasons: body.reasons, manual: true },
+    );
+  }
+
+  @Post('inventory/:id/unlink')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Detach an inventory item from its catalog link' })
+  @ApiOkResponse({ description: 'Updated inventory item with linkStatus=unlinked' })
+  unlinkInventoryItem(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.inventoryService.unlinkFromCatalog(user.tenantId, id, body?.reason);
+  }
+
+  @Post('inventory/run-matching')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Run AI matching across all unlinked items for the current pharmacy',
+    description: 'Auto-links high-confidence barcode matches and marks 70+ scores as suggested.',
+  })
+  @ApiOkResponse({ description: '{ scanned, suggested, autoLinked }' })
+  runMatching(@CurrentUser() user: any) {
+    return this.matchingService.runMatchingForTenant(user.tenantId);
+  }
+
   @Get('products/barcode/:barcode')
   @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN)
   @ApiOperation({
@@ -148,18 +323,64 @@ export class InventoryController {
   }
 
   @Post('products')
-  @Roles(Role.SYSTEM_ADMIN, Role.SUPPLIER_ADMIN)
+  @Roles(Role.SYSTEM_ADMIN, Role.SUPPLIER_ADMIN, Role.PHARMACY_ADMIN)
   @ApiOperation({
     summary: 'Create a new product in the master catalog',
     description:
       'System admin creates verified products. ' +
-      'Supplier admin can also create products — they are flagged as requiresMapping=true ' +
+      'Supplier and pharmacy admins can also create products — they are flagged as requiresMapping=true ' +
       'until a system admin maps them to a canonical product via /normalization.',
   })
   @ApiCreatedResponse({ description: 'Product created successfully' })
-  createProduct(@CurrentUser() user: any, @Body() dto: CreateProductDto) {
-    // Products created by suppliers are unverified until mapped
-    if (user.role === Role.SUPPLIER_ADMIN) {
+  async createProduct(@CurrentUser() user: any, @Body() dto: CreateProductDto) {
+    // Pre-creation similarity gate: stop pharmacy/supplier admins from
+    // accidentally re-creating a product that already exists in the verified
+    // catalog. System admins are trusted (they curate the catalog).
+    // The gate is skipped when the caller explicitly opts in via forceCreate,
+    // which the frontend sends only after showing the user the suggested
+    // existing products and getting confirmation.
+    const isAdminCreator =
+      user.role === Role.SUPPLIER_ADMIN || user.role === Role.PHARMACY_ADMIN;
+    if (isAdminCreator && !dto.forceCreate) {
+      const candidates = await this.matchingService.findCandidates(
+        {
+          name: dto.name,
+          nameAr: dto.nameAr,
+          barcode: dto.barcode,
+          manufacturer: dto.manufacturer,
+          strength: dto.strength,
+          dosageForm: dto.dosageForm,
+        },
+        5,
+      );
+      const strong = candidates.filter((c) => c.score >= 85);
+      if (strong.length > 0) {
+        throw new ConflictException({
+          code: 'SIMILAR_PRODUCT_EXISTS',
+          message:
+            'يوجد منتج مشابه بالفعل في الكتالوج. راجع الاقتراحات قبل إنشاء منتج جديد.',
+          requiresForceCreate: true,
+          candidates: strong.map((c) => ({
+            productId: c.product.id,
+            score: c.score,
+            signals: c.signals,
+            reasons: c.reasons,
+            product: {
+              id: c.product.id,
+              name: c.product.name,
+              nameAr: c.product.nameAr,
+              manufacturer: c.product.manufacturer,
+              strength: c.product.strength,
+              dosageForm: c.product.dosageForm,
+              barcode: c.product.barcode,
+            },
+          })),
+        });
+      }
+    }
+
+    // Products created by non-system admins are unverified until mapped
+    if (isAdminCreator) {
       return this.inventoryService.createProduct({ ...dto, requiresMapping: true });
     }
     return this.inventoryService.createProduct(dto);

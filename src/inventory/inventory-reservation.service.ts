@@ -2,7 +2,8 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { InjectRedis } from '@nestjs-modules/ioredis';
+import { Inject } from '@nestjs/common';
+import { REDIS_CLIENT } from '../common/redis/redis.module';
 import Redis from 'ioredis';
 import {
   InventoryReservation, ReservationStatus,
@@ -41,7 +42,7 @@ export class InventoryReservationService {
   constructor(
     @InjectRepository(InventoryReservation)
     private readonly repo: Repository<InventoryReservation>,
-    @InjectRedis()
+    @Inject(REDIS_CLIENT)
     private readonly redis: Redis,
   ) {}
 

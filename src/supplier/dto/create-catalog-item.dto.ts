@@ -1,11 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsUUID,
-  IsNumber,
-  IsBoolean,
-  IsOptional,
-  Min,
-} from 'class-validator';
+import { IsUUID, IsNumber, IsBoolean, IsOptional, IsString, Min } from 'class-validator';
 
 export class CreateCatalogItemDto {
   @ApiProperty({ example: 'uuid-of-product' })
@@ -17,14 +11,19 @@ export class CreateCatalogItemDto {
   @Min(0)
   price: number;
 
-  @ApiPropertyOptional({ example: true })
+  @ApiPropertyOptional({ example: 'SAR', default: 'SAR' })
   @IsOptional()
-  @IsBoolean()
-  isAvailable?: boolean;
+  @IsString()
+  currency?: string;
 
   @ApiPropertyOptional({ example: 200, minimum: 0 })
   @IsOptional()
   @IsNumber()
   @Min(0)
   stock?: number;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  isAvailable?: boolean;
 }

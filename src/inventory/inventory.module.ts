@@ -6,8 +6,10 @@ import { InventoryService } from './inventory.service';
 import { ConsumptionAnalyticsService } from './consumption-analytics.service';
 import { InventoryImportService } from './inventory-import.service';
 import { BarcodeLookupService } from './barcode-lookup.service';
+import { BatchesService } from './batches.service';
 import { ProductRecallService } from './product-recall.service';
 import { ProductRecallController } from './product-recall.controller';
+import { CatalogMatchingService } from './catalog-matching.service';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
 import { ConsumptionSnapshot } from './entities/consumption-snapshot.entity';
@@ -26,7 +28,7 @@ import { NormalizationModule } from '../normalization/normalization.module';
     NormalizationModule,
   ],
   controllers: [InventoryController, ProductRecallController],
-  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, ProductRecallService],
-  exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, ProductRecallService, TypeOrmModule],
+  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService],
+  exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, TypeOrmModule],
 })
 export class InventoryModule {}

@@ -27,6 +27,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { WorkflowModule } from './workflow/workflow.module';
 import { FinancialModule } from './financial/financial.module';
 import { SecurityModule } from './security/security.module';
+import { CatalogRequestsModule } from './catalog-requests/catalog-requests.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 
 @Module({
@@ -117,6 +118,7 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     WorkflowModule,
     FinancialModule,
     SecurityModule,
+    CatalogRequestsModule,
   ],
 
   providers: [

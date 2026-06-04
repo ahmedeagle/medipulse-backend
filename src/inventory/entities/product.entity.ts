@@ -18,6 +18,10 @@ export class Product {
   @Column({ type: 'varchar', length: 255 })
   name: string;
 
+  /** Arabic display name — shown in Arabic UI */
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  nameAr: string;
+
   @Column({ type: 'varchar', length: 255, nullable: true })
   genericName: string;
 
@@ -26,6 +30,10 @@ export class Product {
 
   @Column({ type: 'varchar', length: 50 })
   unit: string;
+
+  /** Internal SKU / product code used by the pharmacy */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  sku: string;
 
   @Column({ type: 'varchar', length: 100, nullable: true, unique: true })
   barcode: string;

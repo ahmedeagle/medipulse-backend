@@ -41,10 +41,22 @@ export class PurchaseApprovalExecutor {
     } catch (err) {
       const reason = (err as Error).message;
       this.logger.error(`approval ${approval.id} execution failed: ${reason}`);
-      // Mark the underlying approval as expired-equivalent by recording the
-      // failure in executionResult; the row stays in `approved` state so the
-      // pharmacist can retry by creating a fresh draft. We deliberately do
-      // NOT auto-reject — the user already approved; this is an exec error.
+
+      // Reject the underlying draft so the cron won't regenerate the same
+      // failed approval every 5 minutes. We swallow the rejectDraft error
+      // (e.g. draft already in non-pending state) — the executionResult on
+      // the approval is the source of truth either way.
+      try {
+        await this.drafts.rejectDraft(approval.tenantId, draftId, `Auto-rejected after execution failure: ${reason}`);
+      } catch (rejectErr) {
+        this.logger.warn(
+          `couldn't reject draft ${draftId} after exec failure: ${(rejectErr as Error).message}`,
+        );
+      }
+
+      // Mark the approval as executed-with-failure. The row stays visible
+      // in the AI Center under "Failed execution" so the pharmacist sees
+      // exactly what went wrong and can act manually if needed.
       try {
         await this.approvals.markExecuted(approval.tenantId, approval.id, {
           error:      reason,

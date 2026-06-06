@@ -12,6 +12,7 @@ import { Tenant }              from '../auth/entities/tenant.entity';
 import { User }                from '../auth/entities/user.entity';
 import { AiRecommendation }    from '../ai/entities/ai-recommendation.entity';
 import { ProcurementDraft }    from '../procurement/entities/procurement-draft.entity';
+import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 
 import { ApprovalService }     from './approval.service';
 import { AgentService }        from './agent.service';
@@ -48,6 +49,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
       User,
       AiRecommendation,
       ProcurementDraft,
+      SupplierCatalogItem,
     ]),
   ],
   providers:   [

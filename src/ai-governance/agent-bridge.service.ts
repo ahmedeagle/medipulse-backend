@@ -11,6 +11,7 @@ import { ProcurementDraft } from '../procurement/entities/procurement-draft.enti
 import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Product } from '../inventory/entities/product.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
+import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 import {
   EVENTS,
   RecommendationGeneratedEvent,
@@ -42,6 +43,7 @@ export class AgentBridgeService {
     @InjectRepository(Product)          private readonly productRepo:Repository<Product>,
     @InjectRepository(Tenant)           private readonly tenantRepo: Repository<Tenant>,
     @InjectRepository(Approval)         private readonly approvalRepo: Repository<Approval>,
+    @InjectRepository(SupplierCatalogItem) private readonly catalogRepo: Repository<SupplierCatalogItem>,
     private readonly approvals: ApprovalService,
   ) {}
 
@@ -130,7 +132,7 @@ export class AgentBridgeService {
     const supplierIds = Array.from(new Set(drafts.map(d => d.supplierTenantId)));
     const draftIds    = drafts.map(d => d.id);
 
-    const [products, suppliers, existing] = await Promise.all([
+    const [products, suppliers, existing, listings] = await Promise.all([
       productIds.length
         ? this.productRepo.find({ where: { id: In(productIds) } })
         : Promise.resolve([]),
@@ -141,15 +143,70 @@ export class AgentBridgeService {
         where: { subjectType: 'procurement_draft', subjectId: In(draftIds) },
         select: ['subjectId'],
       }),
+      productIds.length && supplierIds.length
+        ? this.catalogRepo.find({
+            where: {
+              productId:        In(productIds),
+              supplierTenantId: In(supplierIds),
+              isAvailable:      true,
+            },
+            select: ['productId', 'supplierTenantId', 'stock'],
+          })
+        : Promise.resolve([]),
     ]);
 
     const productById  = new Map(products.map(p => [p.id, p]));
     const supplierById = new Map(suppliers.map(s => [s.id, s]));
     const seen         = new Set(existing.map(a => a.subjectId));
+    // Pre-flight set: only drafts whose (productId, supplierTenantId) tuple
+    // still has an *available* listing should ever reach the human queue.
+    const listingKey   = (productId: string, supplierTenantId: string) =>
+      `${productId}::${supplierTenantId}`;
+    const availableListings = new Map<string, number>();
+    for (const l of listings) {
+      availableListings.set(listingKey(l.productId, l.supplierTenantId), Number(l.stock ?? 0));
+    }
 
     let created = 0;
+    let preflightExpired = 0;
     for (const d of drafts) {
       if (seen.has(d.id)) continue;
+
+      // Pre-flight #1: supplier no longer carries this product → expire the
+      // draft so the cron stops re-picking it, and skip approval.
+      const key = listingKey(d.productId, d.supplierTenantId);
+      const stock = availableListings.get(key);
+      if (stock === undefined) {
+        try {
+          await this.draftRepo.update(d.id, {
+            status:          'expired' as any,
+            rejectionReason: 'No active supplier listing for this product anymore',
+          });
+          preflightExpired++;
+        } catch (err) {
+          this.logger.warn(`pre-flight expire failed (${d.id}): ${(err as Error).message}`);
+        }
+        continue;
+      }
+
+      // Pre-flight #2: supplier listing exists but stock is insufficient.
+      // We still surface the approval (the listing might restock), but tag
+      // the draft urgency context — UI can decide to warn the pharmacist.
+      // Note: stock=0 means "available but quantity unknown" in current
+      // schema, so we only block when stock is positive AND below request.
+      if (stock > 0 && stock < d.suggestedQuantity) {
+        try {
+          await this.draftRepo.update(d.id, {
+            status:          'expired' as any,
+            rejectionReason: `Supplier stock (${stock}) is below requested quantity (${d.suggestedQuantity})`,
+          });
+          preflightExpired++;
+        } catch (err) {
+          this.logger.warn(`pre-flight expire (low-stock) failed (${d.id}): ${(err as Error).message}`);
+        }
+        continue;
+      }
+
       try {
         await this.createDraftApproval(
           d,
@@ -161,7 +218,8 @@ export class AgentBridgeService {
         this.logger.error(`draft approval failed (${d.id}): ${(err as Error).message}`);
       }
     }
-    if (created) this.logger.log(`Purchase-Expert: created ${created} approval(s) from drafts`);
+    if (created)         this.logger.log(`Purchase-Expert: created ${created} approval(s) from drafts`);
+    if (preflightExpired) this.logger.warn(`Purchase-Expert: pre-flight expired ${preflightExpired} draft(s) — supplier listing missing or insufficient`);
   }
 
   private async createDraftApproval(

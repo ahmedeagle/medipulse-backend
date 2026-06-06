@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 
+import { AiModule }            from '../ai/ai.module';
 import { AgentDefinition }     from './entities/agent-definition.entity';
 import { AgentTenantSetting }  from './entities/agent-tenant-setting.entity';
 import { Approval }            from './entities/approval.entity';
@@ -41,6 +42,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
   imports: [
     ScheduleModule.forRoot(),
     NotificationsModule,
+    AiModule,
     TypeOrmModule.forFeature([
       AgentDefinition,
       AgentTenantSetting,

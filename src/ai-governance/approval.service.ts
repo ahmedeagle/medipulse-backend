@@ -175,14 +175,40 @@ export class ApprovalService {
     });
   }
 
-  /** Tenant-wide audit feed (newest first) for the AI Center Audit tab. */
+  /**
+   * Tenant-wide audit feed (newest first) for the AI Center Audit tab.
+   *
+   * Enriched with the approval's title + subjectType so auditors can read
+   * "WHO did WHAT on WHICH item" in a single row, without N+1 queries.
+   */
   async tenantEvents(tenantId: string, limit: number, offset: number) {
-    const [data, total] = await this.events.findAndCount({
+    const [rawEvents, total] = await this.events.findAndCount({
       where: { tenantId },
       order: { createdAt: 'DESC' },
       take: limit,
       skip: offset,
     });
+
+    const approvalIds = Array.from(new Set(rawEvents.map(e => e.approvalId)));
+    const approvals = approvalIds.length
+      ? await this.repo.find({
+          where: { id: In(approvalIds) },
+          select: ['id', 'title', 'subjectType', 'subjectId', 'priority'],
+        })
+      : [];
+    const byId = new Map(approvals.map(a => [a.id, a]));
+
+    const data = rawEvents.map(ev => {
+      const a = byId.get(ev.approvalId);
+      return {
+        ...ev,
+        approvalTitle:       a?.title       ?? null,
+        approvalSubjectType: a?.subjectType ?? null,
+        approvalSubjectId:   a?.subjectId   ?? null,
+        approvalPriority:    a?.priority    ?? null,
+      };
+    });
+
     return { data, total, limit, offset };
   }
 

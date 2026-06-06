@@ -31,6 +31,7 @@ import { DashboardService } from './dashboard.service';
 import { AgentBridgeService } from './agent-bridge.service';
 import { AiAuditStatsService } from './ai-audit-stats.service';
 import { AiTokenBudget } from '../ai/governance/token-budget';
+import { AiService } from '../ai/ai.service';
 import {
   BulkDecideDto,
   DecideApprovalDto,
@@ -60,6 +61,7 @@ export class AiCenterController {
     private readonly bridge:    AgentBridgeService,
     private readonly aiStats:   AiAuditStatsService,
     private readonly tokenBudget: AiTokenBudget,
+    private readonly aiSvc:     AiService,
   ) {}
 
   // ── Workforce Dashboard ──────────────────────────────────
@@ -253,5 +255,30 @@ export class AiCenterController {
   })
   syncNow(@CurrentUser() user: any) {
     return this.bridge.backfillTenant(user.tenantId);
+  }
+
+  // ── Generation (replaces legacy /ai/recommendations/generate) ─────────
+
+  @Post('generate')
+  @Roles(Role.PHARMACY_ADMIN)
+  @HttpCode(202)
+  @ApiOperation({
+    summary: 'Enqueue an AI recommendation generation run',
+    description:
+      'Returns { jobId, status: "queued" } immediately. Poll GET /ai-center/generate/:jobId for results. ' +
+      'Rate limited per tenant.',
+  })
+  generate(@CurrentUser() user: any) {
+    return this.aiSvc.enqueueGeneration(user.tenantId, user.id);
+  }
+
+  @Get('generate/:jobId')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Poll AI generation job status' })
+  generateStatus(
+    @CurrentUser() user: any,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.aiSvc.getJobStatus(user.tenantId, jobId);
   }
 }

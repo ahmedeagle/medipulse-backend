@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
-import { AiController } from './ai.controller';
 import { AiService } from './ai.service';
 import { AiRecommendation } from './entities/ai-recommendation.entity';
 import { AiAuditLog } from './entities/ai-audit-log.entity';
@@ -27,7 +26,7 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     ForecastingModule,
     RedisModule,
   ],
-  controllers: [AiController],
+  controllers: [],
   providers: [AiService, AiRateLimiter, AiTokenBudget],
   exports: [AiService, AiTokenBudget],
 })

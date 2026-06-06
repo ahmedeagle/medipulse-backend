@@ -82,6 +82,14 @@ export class InventoryItem {
   @Column({ type: 'timestamp', nullable: true })
   lastLinkedAt: Date | null;
 
+  /**
+   * If this row was created by a bulk-import batch, the batch id that produced
+   * it. Null for items added through the manual UI. Used for audit + so the
+   * frontend can link "view items from this upload" from the import history.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  importBatchId: string | null;
+
   @Column({ type: 'timestamp', nullable: true })
   deletedAt: Date;
 

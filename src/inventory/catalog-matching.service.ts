@@ -273,9 +273,64 @@ export class CatalogMatchingService {
   }
 
   /**
-   * Bulk-suggest matches for every `unlinked` item of a tenant.
-   * Auto-promotes high-confidence candidates (>= 90) to `suggested` so
-   * the UI can show a "review match" badge without further user action.
+   * Re-run the matcher against a single inventory item and apply the result.
+   * Used by the matcher worker for tenant-wide rematch pagination — exposed
+   * as a public method so HTTP and worker code share one decision tree.
+   *
+   * Returns one of:
+   *   - 'auto-linked' : barcode + corroborating signal at ≥95
+   *   - 'suggested'   : score in [70..95) or barcode-only
+   *   - 'unmatched'   : no candidate cleared the threshold
+   *   - 'skipped'     : item lacks any usable identifier (name/barcode)
+   */
+  async runForItem(
+    pharmacyTenantId: string,
+    itemId: string,
+  ): Promise<'auto-linked' | 'suggested' | 'unmatched' | 'skipped'> {
+    const item = await this.inventoryRepo.findOne({
+      where: { id: itemId, pharmacyTenantId },
+      relations: ['product'],
+    });
+    if (!item) return 'skipped';
+
+    const profile = this.profileFromItem(item);
+    if (!profile.name && !profile.nameAr && !profile.barcode) return 'skipped';
+
+    const [top] = await this.findCandidates(profile, 1);
+    if (!top) return 'unmatched';
+
+    const corroborating = top.signals.some(
+      s => s === 'name_exact' || s === 'name_strong' || s === 'name_partial' || s === 'manufacturer_match',
+    );
+
+    if (top.score >= 95 && top.signals.includes('barcode_exact') && corroborating) {
+      await this.inventoryRepo.update(item.id, {
+        productId:        top.product.id,
+        linkStatus:       'linked',
+        matchScore:       top.score,
+        matchExplanation: { signals: top.signals, reasons: top.reasons, autoLinked: true } as any,
+        lastLinkedAt:     new Date(),
+      });
+      return 'auto-linked';
+    }
+
+    if (top.score >= 70 || top.signals.includes('barcode_exact')) {
+      await this.inventoryRepo.update(item.id, {
+        linkStatus:       'suggested',
+        matchScore:       top.score,
+        matchExplanation: { signals: top.signals, reasons: top.reasons, suggestedProductId: top.product.id } as any,
+      });
+      return 'suggested';
+    }
+
+    return 'unmatched';
+  }
+
+  /**
+   * @deprecated Use the async MATCH_TENANT_JOB queue path instead — this
+   *   sync method only handles 500 items at a time and will hit HTTP timeouts
+   *   on large tenants. Left here for tests + the legacy /run-matching path
+   *   that now delegates to the queue.
    */
   async runMatchingForTenant(pharmacyTenantId: string): Promise<{
     scanned: number;
@@ -293,35 +348,9 @@ export class CatalogMatchingService {
     let autoLinked = 0;
 
     for (const item of unlinked) {
-      const profile = this.profileFromItem(item);
-      if (!profile.name && !profile.nameAr && !profile.barcode) continue;
-
-      const [top] = await this.findCandidates(profile, 1);
-      if (!top) continue;
-
-      if (top.score >= 95
-          && top.signals.includes('barcode_exact')
-          && top.signals.some(s => s === 'name_exact' || s === 'name_strong' || s === 'name_partial' || s === 'manufacturer_match')) {
-        // Defense in depth: barcode alone can be mistyped or shared by accident
-        // (e.g. private-label re-packs). We require a corroborating signal
-        // (name OR manufacturer) before auto-linking without human review.
-        await this.inventoryRepo.update(item.id, {
-          productId:        top.product.id,
-          linkStatus:       'linked',
-          matchScore:       top.score,
-          matchExplanation: { signals: top.signals, reasons: top.reasons, autoLinked: true } as any,
-          lastLinkedAt:     new Date(),
-        });
-        autoLinked++;
-      } else if (top.score >= 70 || top.signals.includes('barcode_exact')) {
-        // Barcode-only matches still surface as suggestions for human review.
-        await this.inventoryRepo.update(item.id, {
-          linkStatus:       'suggested',
-          matchScore:       top.score,
-          matchExplanation: { signals: top.signals, reasons: top.reasons, suggestedProductId: top.product.id } as any,
-        });
-        suggested++;
-      }
+      const result = await this.runForItem(pharmacyTenantId, item.id);
+      if (result === 'auto-linked') autoLinked++;
+      else if (result === 'suggested') suggested++;
     }
 
     return { scanned: unlinked.length, suggested, autoLinked };

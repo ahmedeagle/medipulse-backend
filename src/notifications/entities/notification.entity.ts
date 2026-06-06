@@ -15,6 +15,8 @@ export type NotificationType =
   | 'forecast_spike'
   | 'reorder_deadline'
   | 'dead_stock_warning'
+  | 'inventory_batch_complete'
+  | 'inventory_batch_failed'
   | 'system';
 
 /**

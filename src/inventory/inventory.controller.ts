@@ -14,6 +14,7 @@ import {
   UseInterceptors,
   UploadedFile,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
@@ -27,6 +28,8 @@ import {
   ApiConsumes,
   ApiBody,
 } from '@nestjs/swagger';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { InventoryService } from './inventory.service';
 import { InventoryImportService } from './inventory-import.service';
 import { BarcodeLookupService } from './barcode-lookup.service';
@@ -41,6 +44,11 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
 import { CatalogMatchingService } from './catalog-matching.service';
+import { ImportBatchService } from './import-batch.service';
+import {
+  MATCH_QUEUE,
+  MATCH_TENANT_JOB,
+} from './match.constants';
 
 @ApiTags('inventory')
 @ApiBearerAuth('access-token')
@@ -53,6 +61,8 @@ export class InventoryController {
     private readonly barcodeSvc: BarcodeLookupService,
     private readonly batchesService: BatchesService,
     private readonly matchingService: CatalogMatchingService,
+    private readonly importBatches: ImportBatchService,
+    @InjectQueue(MATCH_QUEUE) private readonly matchQueue: Queue,
   ) {}
 
   @Get('inventory')
@@ -112,17 +122,72 @@ export class InventoryController {
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
-    description: 'CSV file. Headers: productName, genericName, category, unit, quantity, minThreshold, expiryDate, barcode',
+    description: 'CSV file. Headers: productName, genericName, category, unit, quantity, minThreshold, expiryDate, barcode, manufacturer, strength, dosageForm, nameAr',
   })
   @ApiOperation({
-    summary: 'Bulk import pharmacy inventory from CSV — solves onboarding friction',
+    summary: 'Bulk import pharmacy inventory from CSV (asynchronous)',
     description:
-      'Upload up to 500 products in one step. Each row is auto-mapped via the normalization ' +
-      'engine. Existing items are updated; new items are created. Returns full import report.',
+      'Two-phase pipeline: parses + validates the CSV synchronously (under 5 s for any size), ' +
+      'creates an ImportBatch, stages rows, and enqueues an AI-matching worker job. ' +
+      'Returns { batchId, total } immediately. The frontend polls GET /inventory/imports/:id ' +
+      'for live progress and final counters (autoLinked, suggested, unlinked).',
   })
-  importInventory(@CurrentUser() user: any, @UploadedFile() file: Express.Multer.File) {
-    if (!file) throw new Error('No file uploaded');
-    return this.importService.importCsv(user.tenantId, file.buffer);
+  @ApiCreatedResponse({ description: '{ batchId: string, total: number }' })
+  async importInventory(
+    @CurrentUser() user: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    return this.importService.ingestCsv(user.tenantId, user.id ?? null, file);
+  }
+
+  // ── Import progress & history (async batch UI) ──────────────────────────────
+
+  @Get('inventory/imports')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'List recent inventory import batches for the current pharmacy',
+    description:
+      'Returns up to 20 batches (CSV uploads, Smart Link runs, admin cascades), newest first. ' +
+      'Drives the upload-history sidebar so the user can see past results without re-uploading.',
+  })
+  @ApiOkResponse({ description: 'Array of ImportBatch records' })
+  listImports(@CurrentUser() user: any) {
+    return this.importBatches.listForTenant(user.tenantId);
+  }
+
+  @Get('inventory/imports/:id')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Get live progress + counters of one import batch',
+    description:
+      'Polled every 2 s by the frontend ImportProgressToast to drive the live progress bar. ' +
+      'Returns the full ImportBatch including counters, errors, and status transitions.',
+  })
+  @ApiOkResponse({ description: 'ImportBatch with current counters and status' })
+  @ApiNotFoundResponse({ description: 'Batch not found' })
+  @ApiForbiddenResponse({ description: 'Batch belongs to a different pharmacy' })
+  getImport(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.importBatches.getForTenant(user.tenantId, id);
+  }
+
+  @Post('inventory/imports/:id/cancel')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Cancel an in-flight import batch',
+    description:
+      'Flips status → cancelled, drops pending staged rows. The worker checks status before each ' +
+      'chunk and exits cleanly. Already-processed rows stay in inventory.',
+  })
+  @ApiOkResponse({ description: 'Updated ImportBatch (status=cancelled)' })
+  cancelImport(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.importBatches.cancel(user.tenantId, id);
   }
 
   // ── Batches (per-lot tracking) ───────────────────────────────────────────────
@@ -286,12 +351,37 @@ export class InventoryController {
   @Post('inventory/run-matching')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({
-    summary: 'Run AI matching across all unlinked items for the current pharmacy',
-    description: 'Auto-links high-confidence barcode matches and marks 70+ scores as suggested.',
+    summary: 'Smart Link — re-run AI matching across all unlinked items (asynchronous)',
+    description:
+      'Creates a tenant_rematch ImportBatch and enqueues a worker job. Same progress endpoint ' +
+      '(GET /inventory/imports/:id) drives the wizard UI. Returns { batchId } immediately so the ' +
+      'user can keep working while the worker drains the unlinked items.',
   })
-  @ApiOkResponse({ description: '{ scanned, suggested, autoLinked }' })
-  runMatching(@CurrentUser() user: any) {
-    return this.matchingService.runMatchingForTenant(user.tenantId);
+  @ApiCreatedResponse({ description: '{ batchId: string, total: number }' })
+  async runMatching(@CurrentUser() user: any) {
+    // Count unlinked items to seed the batch.total so the progress bar has
+    // a denominator from the start. Worker reads the actual rows page-by-page.
+    const totalUnlinked = await this.inventoryService.countUnlinked(user.tenantId);
+    const batch = await this.importBatches.create({
+      tenantId:   user.tenantId,
+      userId:     user.id ?? null,
+      kind:       'tenant_rematch',
+      sourceFile: null,
+      total:      totalUnlinked,
+    });
+
+    await this.matchQueue.add(
+      MATCH_TENANT_JOB,
+      { batchId: batch.id, tenantId: user.tenantId },
+      {
+        jobId: `rematch:${batch.id}`,
+        removeOnComplete: { age: 86_400 },
+        removeOnFail:     { age: 604_800 },
+        attempts:         3,
+        backoff:          { type: 'exponential', delay: 5_000 },
+      },
+    );
+    return { batchId: batch.id, total: totalUnlinked };
   }
 
   @Get('products/barcode/:barcode')

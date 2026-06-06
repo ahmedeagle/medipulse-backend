@@ -45,6 +45,19 @@ export class InventoryService {
       .getMany();
   }
 
+  /**
+   * Count of items still in `unlinked` state — drives the Smart Link
+   * batch.total so the progress bar has a denominator on the first poll.
+   */
+  async countUnlinked(tenantId: string): Promise<number> {
+    return this.inventoryItemRepository.count({
+      where: {
+        pharmacyTenantId: tenantId,
+        linkStatus: 'unlinked' as any,
+      },
+    });
+  }
+
   async create(tenantId: string, dto: CreateInventoryItemDto): Promise<InventoryItem> {
     const product = await this.productRepository.findOne({
       where: { id: dto.productId },

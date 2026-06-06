@@ -11,6 +11,7 @@ import { AnalyticsWorkerModule } from './analytics/analytics-worker.module';
 import { AuthEventsModule } from './auth/auth-events.module';
 import { ForecastingWorkerModule } from './forecasting/forecasting-worker.module';
 import { ProcurementWorkerModule } from './procurement/procurement-worker.module';
+import { MatchWorkerModule } from './inventory/match-worker.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { HealthModule } from './health/health.module';
 
@@ -82,6 +83,7 @@ import { HealthModule } from './health/health.module';
     AuthEventsModule,
     ForecastingWorkerModule,
     ProcurementWorkerModule,
+    MatchWorkerModule,
     NotificationsModule,
 
     // ── Minimal health endpoint for container probes ──────────────────────────

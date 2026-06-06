@@ -17,6 +17,7 @@ export type NotificationType =
   | 'dead_stock_warning'
   | 'inventory_batch_complete'
   | 'inventory_batch_failed'
+  | 'morning_briefing'
   | 'system';
 
 /**

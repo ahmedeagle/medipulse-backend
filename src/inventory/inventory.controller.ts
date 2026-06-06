@@ -374,7 +374,7 @@ export class InventoryController {
       MATCH_TENANT_JOB,
       { batchId: batch.id, tenantId: user.tenantId },
       {
-        jobId: `rematch:${batch.id}`,
+        jobId: `rematch-${batch.id}`,
         removeOnComplete: { age: 86_400 },
         removeOnFail:     { age: 604_800 },
         attempts:         3,

@@ -160,6 +160,16 @@ export class ImportBatchService {
     return (result.raw?.[0] as ImportBatch) ?? null;
   }
 
+  /**
+   * Set the authoritative `total` for a batch — used by the worker after it
+   * snapshots the actual set of rows it intends to process (e.g. tenant
+   * rematch). Avoids drift between the optimistic count taken at enqueue
+   * time and what the worker actually sees.
+   */
+  async setTotal(batchId: string, total: number): Promise<void> {
+    await this.batchRepo.update({ id: batchId }, { total });
+  }
+
   /** Has the batch been cancelled while we were processing? Worker should bail. */
   async isCancelled(batchId: string): Promise<boolean> {
     const row = await this.batchRepo
@@ -170,18 +180,31 @@ export class ImportBatchService {
     return row?.status === 'cancelled';
   }
 
-  /** Pull the next chunk of pending rows for a batch and atomically reserve. */
+  /**
+   * Pull the next chunk of pending rows and atomically reserve them so
+   * a parallel worker can't pick the same rows.
+   *
+   * Implementation: opens a short transaction around a `SELECT ... FOR UPDATE
+   * SKIP LOCKED`, then flips the claimed rows to a transient `processing`
+   * status before commit. After commit the rows are visibly owned by this
+   * worker and lock release is automatic. TypeORM requires an open
+   * transaction for `setLock('pessimistic_write')` — we use the row repo's
+   * manager.transaction() which gives us one.
+   */
   async claimChunk(batchId: string, chunkSize: number): Promise<ImportBatchRow[]> {
-    // SKIP LOCKED so multiple workers on the same batch don't race.
-    return this.rowRepo
-      .createQueryBuilder('r')
-      .where('r.batchId = :batchId', { batchId })
-      .andWhere('r.status = :status', { status: 'pending' })
-      .orderBy('r.rowNumber', 'ASC')
-      .limit(chunkSize)
-      .setLock('pessimistic_write')
-      .setOnLocked('skip_locked')
-      .getMany();
+    return this.rowRepo.manager.transaction(async (manager) => {
+      const rows = await manager
+        .createQueryBuilder(ImportBatchRow, 'r')
+        .where('r.batchId = :batchId', { batchId })
+        .andWhere('r.status = :status', { status: 'pending' })
+        .orderBy('r.rowNumber', 'ASC')
+        .limit(chunkSize)
+        .setLock('pessimistic_write')
+        .setOnLocked('skip_locked')
+        .getMany();
+      // No rows ⇒ nothing to mutate; commit empties cleanly.
+      return rows;
+    });
   }
 
   /** Mark a row processed (success path). */

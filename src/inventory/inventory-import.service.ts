@@ -123,7 +123,7 @@ export class InventoryImportService {
       { batchId: batch.id, tenantId: pharmacyTenantId },
       {
         // Idempotent: re-enqueue (e.g. retry of the HTTP call) won't double up
-        jobId: `batch:${batch.id}`,
+        jobId: `batch-${batch.id}`,
         removeOnComplete: { age: 86_400 },
         removeOnFail:     { age: 604_800 },
         attempts:         3,

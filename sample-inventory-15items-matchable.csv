@@ -1,0 +1,16 @@
+productName,genericName,strength,dosageForm,category,unit,quantity,minThreshold,expiryDate,manufacturer
+Amoxicillin 500mg Capsules,Amoxicillin,500mg,capsule,Antibiotic,box,80,15,2027-08-15,GSK
+Amlodipine 5mg Tablets,Amlodipine,5mg,tablet,Cardiovascular,box,120,20,2027-12-01,Pfizer
+Atorvastatin 20mg Tablets,Atorvastatin,20mg,tablet,Cardiovascular,box,60,10,2028-03-10,Pfizer
+Aspirin 100mg Tablets,Aspirin,100mg,tablet,Cardiovascular,box,200,30,2027-11-20,Bayer
+Azithromycin 500mg Tablets,Azithromycin,500mg,tablet,Antibiotic,box,45,10,2027-07-05,Pfizer
+Allopurinol 300mg Tablets,Allopurinol,300mg,tablet,Anti-gout,box,30,5,2028-01-15,Sandoz
+Alprazolam 0.5mg Tablets,Alprazolam,0.5mg,tablet,Anxiolytic,box,25,5,2027-09-30,Upjohn
+Atenolol 50mg Tablets,Atenolol,50mg,tablet,Cardiovascular,box,90,15,2028-02-28,AstraZeneca
+Acyclovir 200mg Tablets,Acyclovir,200mg,tablet,Antiviral,box,40,10,2027-10-12,GSK
+Acyclovir 5% Cream,Acyclovir,5%,cream,Antiviral,tube,55,10,2027-06-18,GSK
+Adrenaline 1mg/ml Injection,Epinephrine,1mg/ml,injection,Emergency,vial,15,5,2027-04-01,Hospira
+Betamethasone 0.1% Cream,Betamethasone,0.1%,cream,Dermatology,tube,40,10,2028-05-20,GSK
+Bisacodyl 5mg Tablets,Bisacodyl,5mg,tablet,Laxative,box,70,15,2027-08-30,Boehringer
+Ambroxol 30mg Tablets,Ambroxol,30mg,tablet,Respiratory,box,85,20,2027-12-22,Sanofi
+Amoxicillin 250mg/5ml Suspension,Amoxicillin,250mg/5ml,suspension,Antibiotic,bottle,35,10,2027-05-14,GSK

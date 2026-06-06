@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MulterModule } from '@nestjs/platform-express';
 import { BullModule } from '@nestjs/bullmq';
@@ -12,6 +12,7 @@ import { ProductRecallService } from './product-recall.service';
 import { ProductRecallController } from './product-recall.controller';
 import { CatalogMatchingService } from './catalog-matching.service';
 import { ImportBatchService } from './import-batch.service';
+import { CatalogApprovalExecutor } from './catalog-approval.executor';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
 import { ConsumptionSnapshot } from './entities/consumption-snapshot.entity';
@@ -21,6 +22,7 @@ import { ProductRecall } from './entities/product-recall.entity';
 import { ImportBatch } from './entities/import-batch.entity';
 import { ImportBatchRow } from './entities/import-batch-row.entity';
 import { NormalizationModule } from '../normalization/normalization.module';
+import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
 import { MATCH_QUEUE } from './match.constants';
 
 @Module({
@@ -32,9 +34,10 @@ import { MATCH_QUEUE } from './match.constants';
     MulterModule.register({ limits: { fileSize: 10 * 1024 * 1024 } }),
     BullModule.registerQueue({ name: MATCH_QUEUE }),
     NormalizationModule,
+    forwardRef(() => AiGovernanceModule),
   ],
   controllers: [InventoryController, ProductRecallController],
-  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService],
+  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor],
   exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, TypeOrmModule],
 })
 export class InventoryModule {}

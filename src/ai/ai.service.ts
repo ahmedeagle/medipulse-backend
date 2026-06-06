@@ -30,6 +30,7 @@ import { InputGuard } from './governance/input-guard';
 import { OutputGuard } from './governance/output-guard';
 import { ConfidenceEngine } from './governance/confidence.engine';
 import { AiRateLimiter } from './governance/rate-limiter';
+import { AiTokenBudget } from './governance/token-budget';
 import { getSystemPrompt, CURRENT_PROMPT_VERSION } from './governance/system-prompt';
 import { AI_GENERATE_JOB, AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 import {
@@ -76,7 +77,9 @@ export interface JobStatusResult {
 
 @Injectable()
 export class AiService {
-  private readonly openai: OpenAI;
+  private readonly openai: OpenAI | null;
+  /** True when OPENAI_API_KEY is missing or invalid — system runs in rules-only fallback mode */
+  private readonly aiDegraded: boolean;
   private readonly rulesEngine    = new RulesEngine();
   private readonly inputGuard     = new InputGuard();
   private readonly outputGuard    = new OutputGuard();
@@ -100,13 +103,22 @@ export class AiService {
     private eoqService: EoqService,
     private configService: ConfigService,
     private readonly rateLimiter: AiRateLimiter,
+    private readonly tokenBudget: AiTokenBudget,
     private readonly eventEmitter: EventEmitter2,
     @InjectQueue(AI_RECOMMENDATIONS_QUEUE)
     private readonly queue: Queue,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
-    if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
-    this.openai = new OpenAI({ apiKey, timeout: GPT_TIMEOUT_MS });
+    if (!apiKey) {
+      // Gap #3: degrade gracefully — don't crash the entire module on boot.
+      // Rules engine still ships recommendations with deterministic fallback explanations.
+      this.logger.warn('OPENAI_API_KEY is not configured — AI explanations will use rules-only fallback');
+      this.openai = null;
+      this.aiDegraded = true;
+    } else {
+      this.openai = new OpenAI({ apiKey, timeout: GPT_TIMEOUT_MS });
+      this.aiDegraded = false;
+    }
   }
 
   // ─── Enqueue ──────────────────────────────────────────────────────────────
@@ -309,6 +321,9 @@ export class AiService {
           confidenceLabel: confidence.label,
           rulesTriggered: [raw.type],
           isDismissed: false,
+          // Gap #5 — reproducibility: stamp model + prompt version on the row itself.
+          modelVersion:  fromGpt ? AI_MODEL : null,
+          promptVersion: fromGpt ? CURRENT_PROMPT_VERSION : null,
         });
 
         const result = await this.recommendationRepo.save(entity);
@@ -353,7 +368,10 @@ export class AiService {
           confidenceScore:    confidence.score,
           confidenceLabel:    confidence.label,
           explanationFromGpt: fromGpt,
-        })).catch(() => {}); // fire-and-forget — trace failure must never break recommendation
+        })).catch((err) => {
+          // Gap #1 — don't silently drop the trace; we need to know if explainability is failing.
+          this.logger.warn(`decision trace save failed (${result.id}): ${(err as Error).message}`);
+        });
       }
 
       audit.status = 'success';
@@ -467,6 +485,25 @@ export class AiService {
     outputTokens: number;
     blocked: boolean;
   }> {
+    // Gap #3 — if no API key configured, ship the rules-only fallback. The
+    // recommendation still goes out; only the explanation is deterministic.
+    if (this.aiDegraded || !this.openai) {
+      return {
+        explanation: this.fallbackExplanation(raw),
+        fromGpt: false, inputTokens: 0, outputTokens: 0, blocked: false,
+      };
+    }
+
+    // Gap #7 — hard daily token cap per tenant. When breached, fall back to
+    // the deterministic explanation for the rest of the day.
+    if (!(await this.tokenBudget.hasBudget(tenantId))) {
+      this.logger.warn(`[${tenantId}] daily AI token budget exhausted — using rules-only fallback`);
+      return {
+        explanation: this.fallbackExplanation(raw),
+        fromGpt: false, inputTokens: 0, outputTokens: 0, blocked: false,
+      };
+    }
+
     const prompt = this.buildPrompt(raw);
 
     const inputCheck = this.inputGuard.validate(prompt);
@@ -500,6 +537,9 @@ export class AiService {
       const inputTokens = response.usage?.prompt_tokens ?? 0;
       const outputTokens = response.usage?.completion_tokens ?? 0;
 
+      // Gap #7 — record token usage atomically (fire-and-forget; never blocks).
+      void this.tokenBudget.record(tenantId, inputTokens, outputTokens);
+
       const safeOutput = this.outputGuard.assertSafe(rawOutput);
       if (!safeOutput) {
         this.logger.warn(`[${tenantId}] OutputGuard blocked GPT response`);
@@ -518,7 +558,14 @@ export class AiService {
 
       return { explanation: safeOutput, fromGpt: true, inputTokens, outputTokens, blocked: false };
     } catch (error) {
-      this.logger.warn(`OpenAI call failed (${raw.type}): ${error.message}`);
+      // Gap detection: OpenAI 429 means we're being rate-limited — don't burn
+      // BullMQ retry budget hammering them. Just fall back deterministically.
+      const status = (error as any)?.status ?? (error as any)?.response?.status;
+      if (status === 429) {
+        this.logger.warn(`OpenAI rate-limited (${raw.type}) — using rules-only fallback`);
+      } else {
+        this.logger.warn(`OpenAI call failed (${raw.type}): ${(error as Error).message}`);
+      }
       return {
         explanation: this.fallbackExplanation(raw),
         fromGpt: false,

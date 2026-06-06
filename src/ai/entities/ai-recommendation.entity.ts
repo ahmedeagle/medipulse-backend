@@ -88,6 +88,14 @@ export class AiRecommendation {
   @Column({ type: 'timestamp', nullable: true })
   outcomeAt: Date;
 
+  /** OpenAI model that generated the explanation (pinned, never an alias). NULL if rules-only fallback. */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  modelVersion: string | null;
+
+  /** System-prompt version used. Bumped whenever the prompt template changes — required for reproducibility audit. */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  promptVersion: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

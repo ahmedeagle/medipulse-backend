@@ -11,6 +11,7 @@ import { InventoryModule } from './inventory/inventory.module';
 import { SupplierModule } from './supplier/supplier.module';
 import { OrdersModule } from './orders/orders.module';
 import { AiModule } from './ai/ai.module';
+import { AiGovernanceModule } from './ai-governance/ai-governance.module';
 import { AuditModule } from './audit/audit.module';
 import { AdminModule } from './admin/admin.module';
 import { HealthModule } from './health/health.module';
@@ -102,6 +103,7 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     SupplierModule,
     OrdersModule,
     AiModule,
+    AiGovernanceModule,
     AuditModule,
     AdminModule,
     HealthModule,

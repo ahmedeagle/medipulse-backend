@@ -1,0 +1,4 @@
+productName,nameAr,genericName,category,unit,dosageForm,strength,manufacturer,barcode,sku,quantity,minThreshold,expiryDate,batchNumber,location,costPrice,sellingPrice,sfdaRegistration,atcCode
+Panadol Extra,بنادول إكسترا,Paracetamol + Caffeine,analgesics,tablet,tablet,500mg,GSK,5000158104603,SKU-PAN-001,150,30,2027-03-15,LOT-2026-A1,Main Warehouse,18.50,28.00,SA-SFDA-10234,N02BE51
+Augmentin 1g,أوجمنتين 1 جرام,Amoxicillin + Clavulanic Acid,antibiotics,tablet,tablet,1g,GSK,5000158012345,SKU-AUG-001,80,20,2026-12-01,LOT-2026-B7,Main Warehouse,42.00,65.00,SA-SFDA-20567,J01CR02
+Voltaren Emulgel,فولتارين إيمولجيل,Diclofenac,topical,tube,gel,1%,Novartis,7613064001234,SKU-VOL-001,45,10,2027-08-20,LOT-2026-C3,Cold Storage,35.00,52.00,SA-SFDA-30891,M02AA15

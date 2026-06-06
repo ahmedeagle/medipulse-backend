@@ -12,6 +12,7 @@ import { ForecastingModule } from '../forecasting/forecasting.module';
 import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { AiRateLimiter } from './governance/rate-limiter';
+import { AiTokenBudget } from './governance/token-budget';
 import { RedisModule } from '../common/redis/redis.module';
 import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 
@@ -25,6 +26,6 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     ForecastingModule,
     RedisModule,
   ],
-  providers: [AiService, AiRateLimiter, AiGenerationProcessor],
+  providers: [AiService, AiRateLimiter, AiTokenBudget, AiGenerationProcessor],
 })
 export class AiWorkerModule {}

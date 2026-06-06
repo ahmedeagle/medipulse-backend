@@ -158,54 +158,73 @@ export class MatchProcessor extends WorkerHost {
     if (!claimed) return { outcome: 'skipped' };
 
     try {
-      let cursor: number | null = null;
-      const PAGE = MATCH_CHUNK_SIZE;
-      let totalProcessed = 0;
+      // Snapshot the EXACT set of inventory item IDs to rematch right now.
+      // Cursor-by-timestamp pagination is unsafe here: Postgres `timestamp`
+      // has microsecond precision, JS `Date.getTime()` truncates to ms, so
+      // `createdAt > :cursor` (with a JS-derived cursor) is always true for
+      // the last row in the page — the same rows get re-fetched forever.
+      // An ID snapshot also guarantees "process each item exactly once" even
+      // if the matcher leaves `linkStatus = 'unlinked'` (no candidate found).
+      const snapshot = await this.inventoryRepo
+        .createQueryBuilder('item')
+        .select('item.id', 'id')
+        .where('item.pharmacyTenantId = :tenantId', { tenantId })
+        .andWhere('item.deletedAt IS NULL')
+        .andWhere('item.linkStatus = :status', { status: 'unlinked' })
+        .orderBy('item.createdAt', 'ASC')
+        .getRawMany<{ id: string }>();
 
-      while (true) {
+      const itemIds = snapshot.map((r) => r.id);
+      const totalToProcess = itemIds.length;
+
+      // Reconcile batch.total to what we actually intend to process so the
+      // UI denominator matches reality (the enqueue-time count may have
+      // shifted between request and worker pickup).
+      await this.batches.setTotal(batchId, totalToProcess);
+      this.logger.log(`[rematch:${batchId}] snapshot of ${totalToProcess} unlinked items`);
+
+      if (totalToProcess === 0) {
+        await this.batches.markCompleted(batchId);
+        await job.updateProgress(100);
+        const finalBatch = await this.batches.getRaw(batchId);
+        if (finalBatch) await this.notifyComplete(finalBatch);
+        return { outcome: 'completed' };
+      }
+
+      let totalProcessed = 0;
+      const PAGE = MATCH_CHUNK_SIZE;
+
+      for (let i = 0; i < itemIds.length; i += PAGE) {
         if (await this.batches.isCancelled(batchId)) {
           this.logger.log(`[rematch:${batchId}] cancelled`);
           return { outcome: 'cancelled' };
         }
 
-        const qb = this.inventoryRepo
-          .createQueryBuilder('item')
-          .leftJoinAndSelect('item.product', 'product')
-          .where('item.pharmacyTenantId = :tenantId', { tenantId })
-          .andWhere('item.deletedAt IS NULL')
-          .andWhere('item.linkStatus = :status', { status: 'unlinked' })
-          .orderBy('item.createdAt', 'ASC')
-          .limit(PAGE);
-
-        if (cursor) qb.andWhere('item.createdAt > :cursor', { cursor: new Date(cursor) });
-
-        const items = await qb.getMany();
-        if (items.length === 0) break;
-        cursor = items[items.length - 1].createdAt.getTime();
-
+        const chunkIds = itemIds.slice(i, i + PAGE);
         const delta = {
           processed: 0, imported: 0, updated: 0, skipped: 0,
           autoLinked: 0, suggested: 0, unlinked: 0,
         };
 
-        for (const item of items) {
-          const result = await this.matching.runForItem(tenantId, item.id);
+        for (const itemId of chunkIds) {
+          const result = await this.matching.runForItem(tenantId, itemId);
           delta.processed++;
           if (result === 'auto-linked') delta.autoLinked++;
           else if (result === 'suggested') delta.suggested++;
+          else if (result === 'skipped') delta.skipped++;
           else delta.unlinked++;
           totalProcessed++;
         }
 
         await this.batches.incrementCounters(batchId, delta);
         await job.updateProgress(
-          Math.min(99, Math.round((totalProcessed / Math.max(1, totalProcessed + items.length)) * 100)),
+          Math.min(99, Math.round((totalProcessed / totalToProcess) * 100)),
         );
       }
 
       await this.batches.markCompleted(batchId);
       await job.updateProgress(100);
-      this.logger.log(`[rematch:${batchId}] done, processed ${totalProcessed} items`);
+      this.logger.log(`[rematch:${batchId}] done, processed ${totalProcessed}/${totalToProcess} items`);
       const finalBatch = await this.batches.getRaw(batchId);
       if (finalBatch) await this.notifyComplete(finalBatch);
       return { outcome: 'completed' };

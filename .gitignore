@@ -55,3 +55,5 @@ ecosystem.local.config.js
 
 # TypeORM CLI artifacts
 ormconfig.local.json
+
+.env.local*

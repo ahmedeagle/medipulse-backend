@@ -29,6 +29,6 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
   ],
   controllers: [AiController],
   providers: [AiService, AiRateLimiter, AiTokenBudget],
-  exports: [AiService],
+  exports: [AiService, AiTokenBudget],
 })
 export class AiModule {}

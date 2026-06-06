@@ -81,4 +81,35 @@ export class AiTokenBudget {
   get cap(): number {
     return this.dailyOutputCap;
   }
+
+  /** Today's usage snapshot for the UI (input, output, calls + remaining). */
+  async usageToday(tenantId: string): Promise<{
+    inputTokens:  number;
+    outputTokens: number;
+    calls:        number;
+    cap:          number;
+    remaining:    number;
+    percent:      number;
+  }> {
+    const rows = await this.ds.query(
+      `SELECT "inputTokens","outputTokens","calls"
+         FROM "ai_token_usage"
+        WHERE "tenantId" = $1 AND "day" = CURRENT_DATE`,
+      [tenantId],
+    );
+    const r = rows[0] ?? { inputTokens: 0, outputTokens: 0, calls: 0 };
+    const output = Number(r.outputTokens ?? 0);
+    const remaining = Math.max(0, this.dailyOutputCap - output);
+    const percent = this.dailyOutputCap > 0
+      ? Math.min(100, Math.round((output / this.dailyOutputCap) * 100))
+      : 0;
+    return {
+      inputTokens:  Number(r.inputTokens  ?? 0),
+      outputTokens: output,
+      calls:        Number(r.calls        ?? 0),
+      cap:          this.dailyOutputCap,
+      remaining,
+      percent,
+    };
+  }
 }

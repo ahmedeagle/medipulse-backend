@@ -10,6 +10,7 @@ import {
   RecommendationGeneratedEvent,
   OrderStatusChangedEvent,
   OrderDeliveredEvent,
+  AiGovernanceBlockedEvent,
   EVENTS,
 } from '../events/domain-events';
 import { Role } from '../common/enums/role.enum';
@@ -25,6 +26,14 @@ import { Role } from '../common/enums/role.enum';
 @Injectable()
 export class NotificationEventListener {
   private readonly logger = new Logger(NotificationEventListener.name);
+
+  /**
+   * Per-tenant throttle for AI governance alerts. We only emit one
+   * notification per (tenantId, blockType) per hour to avoid flooding
+   * admins when a misbehaving prompt loops.
+   */
+  private readonly aiBlockedThrottle = new Map<string, number>();
+  private static readonly AI_BLOCKED_THROTTLE_MS = 60 * 60 * 1000;
 
   constructor(
     private readonly notificationSvc: NotificationService,
@@ -135,6 +144,37 @@ export class NotificationEventListener {
       }
     } catch (err: any) {
       this.logger.error(`Notification failed (delivery): ${err.message}`);
+    }
+  }
+
+  // ─── AI governance: blocked input / output ────────────────────────────────
+
+  @OnEvent(EVENTS.AI_GOVERNANCE_BLOCKED ?? 'ai.governance.blocked')
+  async onAiGovernanceBlocked(event: AiGovernanceBlockedEvent): Promise<void> {
+    const key  = `${event.tenantId}:${event.blockType}`;
+    const last = this.aiBlockedThrottle.get(key) ?? 0;
+    const now  = Date.now();
+    if (now - last < NotificationEventListener.AI_BLOCKED_THROTTLE_MS) return;
+    this.aiBlockedThrottle.set(key, now);
+
+    try {
+      const titleAr = event.blockType === 'input'
+        ? 'تم حجب إدخال للذكاء الاصطناعي'
+        : 'تم حجب مخرَج للذكاء الاصطناعي';
+      const bodyAr = event.blockType === 'input'
+        ? `بوابة الأمان منعت إرسال بيانات إلى المساعد. السبب: ${event.reason}`
+        : `بوابة الأمان منعت ردّاً من المساعد قبل وصوله إليك. السبب: ${event.reason}`;
+
+      await this.notificationSvc.create({
+        tenantId:    event.tenantId,
+        type:        'ai_governance_blocked',
+        title:       titleAr,
+        body:        bodyAr,
+        resourceRef: `ai:blocked:${event.blockType}`,
+        emailSent:   false,
+      });
+    } catch (err: any) {
+      this.logger.error(`Notification failed (ai governance blocked): ${err.message}`);
     }
   }
 

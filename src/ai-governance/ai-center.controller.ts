@@ -29,6 +29,8 @@ import { ApprovalService } from './approval.service';
 import { AgentService } from './agent.service';
 import { DashboardService } from './dashboard.service';
 import { AgentBridgeService } from './agent-bridge.service';
+import { AiAuditStatsService } from './ai-audit-stats.service';
+import { AiTokenBudget } from '../ai/governance/token-budget';
 import {
   BulkDecideDto,
   DecideApprovalDto,
@@ -56,6 +58,8 @@ export class AiCenterController {
     private readonly agents:    AgentService,
     private readonly dashboard: DashboardService,
     private readonly bridge:    AgentBridgeService,
+    private readonly aiStats:   AiAuditStatsService,
+    private readonly tokenBudget: AiTokenBudget,
   ) {}
 
   // ── Workforce Dashboard ──────────────────────────────────
@@ -210,6 +214,28 @@ export class AiCenterController {
       Math.min(Number(limit) || 100, 500),
       Math.max(Number(offset) || 0, 0),
     );
+  }
+
+  @Get('audit/ai-runs/stats')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Aggregated GPT-call stats over the last N days (default 7)' })
+  aiRunStats(@CurrentUser() user: any, @Query('days') days?: string) {
+    const d = Math.min(Math.max(Number(days) || 7, 1), 90);
+    return this.aiStats.stats(user.tenantId, d);
+  }
+
+  @Get('audit/ai-runs')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Recent GPT generation attempts (most recent first)' })
+  aiRunsList(@CurrentUser() user: any, @Query('limit') limit?: string) {
+    return this.aiStats.recent(user.tenantId, Number(limit) || 50);
+  }
+
+  @Get('agents/token-usage/today')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Per-tenant AI token usage for today vs daily cap' })
+  tokenUsageToday(@CurrentUser() user: any) {
+    return this.tokenBudget.usageToday(user.tenantId);
   }
 
   // ── Maintenance: on-demand bridge sync ─────────────────────────────────

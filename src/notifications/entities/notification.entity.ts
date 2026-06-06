@@ -18,6 +18,7 @@ export type NotificationType =
   | 'inventory_batch_complete'
   | 'inventory_batch_failed'
   | 'morning_briefing'
+  | 'ai_governance_blocked'
   | 'system';
 
 /**

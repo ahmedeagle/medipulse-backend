@@ -11,6 +11,7 @@ import { Product }             from '../inventory/entities/product.entity';
 import { Tenant }              from '../auth/entities/tenant.entity';
 import { User }                from '../auth/entities/user.entity';
 import { AiRecommendation }    from '../ai/entities/ai-recommendation.entity';
+import { AiAuditLog }          from '../ai/entities/ai-audit-log.entity';
 import { ProcurementDraft }    from '../procurement/entities/procurement-draft.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 
@@ -20,6 +21,8 @@ import { DashboardService }    from './dashboard.service';
 import { ApprovalScheduler }   from './approval.scheduler';
 import { BriefingScheduler }   from './briefing.scheduler';
 import { AgentBridgeService }  from './agent-bridge.service';
+import { AiAuditStatsService } from './ai-audit-stats.service';
+import { AiTokenBudget }       from '../ai/governance/token-budget';
 import { AiCenterController }  from './ai-center.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 
@@ -48,6 +51,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
       Tenant,
       User,
       AiRecommendation,
+      AiAuditLog,
       ProcurementDraft,
       SupplierCatalogItem,
     ]),
@@ -59,6 +63,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
     ApprovalScheduler,
     BriefingScheduler,
     AgentBridgeService,
+    AiAuditStatsService,
+    AiTokenBudget,
   ],
   controllers: [AiCenterController],
   exports:     [ApprovalService, AgentService, TypeOrmModule],

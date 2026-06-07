@@ -13,6 +13,11 @@ import { CreateInventoryItemDto } from './dto/create-inventory-item.dto';
 import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
+import {
+  normalizePagination,
+  PaginatedResult,
+  PaginationQueryDto,
+} from '../common/pagination/pagination-query.dto';
 
 @Injectable()
 export class InventoryService {
@@ -24,24 +29,54 @@ export class InventoryService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async findAll(tenantId: string): Promise<InventoryItem[]> {
-    return this.inventoryItemRepository
+  async findAll(
+    tenantId: string,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<InventoryItem>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.inventoryItemRepository
       .createQueryBuilder('item')
       .leftJoinAndSelect('item.product', 'product')
       .where('item.pharmacyTenantId = :tenantId', { tenantId })
       .andWhere('item.deletedAt IS NULL')
       .orderBy('product.name', 'ASC')
-      .getMany();
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
   }
 
-  async findLowStock(tenantId: string): Promise<InventoryItem[]> {
-    return this.inventoryItemRepository
+  async findLowStock(
+    tenantId: string,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<InventoryItem>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.inventoryItemRepository
       .createQueryBuilder('item')
       .leftJoinAndSelect('item.product', 'product')
       .where('item.pharmacyTenantId = :tenantId', { tenantId })
       .andWhere('item.deletedAt IS NULL')
       .andWhere('item.quantity <= item.minThreshold')
       .orderBy('item.quantity', 'ASC')
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
+  }
+
+  /**
+   * Internal helper that returns EVERY active inventory item for a tenant
+   * (no pagination). Used by background AI generation that needs the full
+   * dataset; never exposed through HTTP. Public list endpoints must use
+   * `findAll(tenantId, pagination)` to keep responses bounded.
+   */
+  async findAllForTenant(tenantId: string): Promise<InventoryItem[]> {
+    return this.inventoryItemRepository
+      .createQueryBuilder('item')
+      .leftJoinAndSelect('item.product', 'product')
+      .where('item.pharmacyTenantId = :tenantId', { tenantId })
+      .andWhere('item.deletedAt IS NULL')
+      .orderBy('product.name', 'ASC')
       .getMany();
   }
 
@@ -197,7 +232,7 @@ export class InventoryService {
     return this.productRepository.save(product);
   }
 
-  async findAllProducts(search?: string, take = 50, skip = 0): Promise<{ data: Product[]; total: number }> {
+  async findAllProducts(search?: string, take = 25, skip = 0): Promise<{ data: Product[]; total: number }> {
     const qb = this.productRepository
       .createQueryBuilder('p')
       .orderBy('p.name', 'ASC')

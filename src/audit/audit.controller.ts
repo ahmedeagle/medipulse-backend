@@ -44,7 +44,7 @@ export class AuditController {
   @ApiQuery({ name: 'userId',   required: false })
   @ApiQuery({ name: 'from',     required: false, description: 'ISO 8601 datetime' })
   @ApiQuery({ name: 'to',       required: false, description: 'ISO 8601 datetime' })
-  @ApiQuery({ name: 'limit',    required: false, schema: { default: 50, maximum: 200 } })
+  @ApiQuery({ name: 'limit',    required: false, schema: { default: 25, maximum: 200 } })
   @ApiQuery({ name: 'offset',   required: false, schema: { default: 0 } })
   @ApiOkResponse({ description: '{ data: AuditEvent[], total: number }' })
   async query(
@@ -53,7 +53,7 @@ export class AuditController {
     @Query('userId')   userId?: string,
     @Query('from')     from?: string,
     @Query('to')       to?: string,
-    @Query('limit',  new DefaultValuePipe(50),  new ParseIntPipe()) limit  = 50,
+    @Query('limit',  new DefaultValuePipe(25),  new ParseIntPipe()) limit  = 25,
     @Query('offset', new DefaultValuePipe(0),   new ParseIntPipe()) offset = 0,
   ) {
     // Scope to own tenant unless system admin

@@ -8,6 +8,11 @@ import { Repository } from 'typeorm';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { User } from '../auth/entities/user.entity';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import {
+  normalizePagination,
+  PaginatedResult,
+  PaginationQueryDto,
+} from '../common/pagination/pagination-query.dto';
 
 @Injectable()
 export class AdminService {
@@ -18,12 +23,17 @@ export class AdminService {
     private userRepository: Repository<User>,
   ) {}
 
-  async findAllTenants(): Promise<(Tenant & { userCount: number })[]> {
-    const tenants = await this.tenantRepository.find({
+  async findAllTenants(
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<Tenant & { userCount: number }>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [tenants, total] = await this.tenantRepository.findAndCount({
       order: { createdAt: 'DESC' },
+      take: limit,
+      skip: offset,
     });
 
-    const tenantsWithCount = await Promise.all(
+    const data = await Promise.all(
       tenants.map(async (tenant) => {
         const userCount = await this.userRepository.count({
           where: { tenantId: tenant.id },
@@ -32,14 +42,20 @@ export class AdminService {
       }),
     );
 
-    return tenantsWithCount;
+    return { data, total, limit, offset };
   }
 
-  async findAllUsers(): Promise<User[]> {
-    return this.userRepository.find({
+  async findAllUsers(
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<User>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.userRepository.findAndCount({
       relations: ['tenant'],
       order: { createdAt: 'DESC' },
+      take: limit,
+      skip: offset,
     });
+    return { data, total, limit, offset };
   }
 
   async createTenant(dto: CreateTenantDto): Promise<Tenant> {

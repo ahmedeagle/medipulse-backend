@@ -45,6 +45,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
 import { CatalogMatchingService } from './catalog-matching.service';
 import { ImportBatchService } from './import-batch.service';
+import { PaginationQueryDto } from '../common/pagination/pagination-query.dto';
 import {
   MATCH_QUEUE,
   MATCH_TENANT_JOB,
@@ -67,18 +68,24 @@ export class InventoryController {
 
   @Get('inventory')
   @Roles(Role.PHARMACY_ADMIN)
-  @ApiOperation({ summary: 'Get all inventory items for the current pharmacy' })
-  @ApiOkResponse({ description: 'Returns all active inventory items with product details' })
-  findAll(@CurrentUser() user: any) {
-    return this.inventoryService.findAll(user.tenantId);
+  @ApiOperation({ summary: 'Get inventory items for the current pharmacy (paginated)' })
+  @ApiOkResponse({ description: '{ data: InventoryItem[], total, limit, offset } — default 25 per page' })
+  findAll(
+    @CurrentUser() user: any,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.inventoryService.findAll(user.tenantId, pagination);
   }
 
   @Get('inventory/low-stock')
   @Roles(Role.PHARMACY_ADMIN)
-  @ApiOperation({ summary: 'Get low-stock inventory items (quantity <= minThreshold)' })
-  @ApiOkResponse({ description: 'Returns items that need restocking' })
-  findLowStock(@CurrentUser() user: any) {
-    return this.inventoryService.findLowStock(user.tenantId);
+  @ApiOperation({ summary: 'Get low-stock inventory items (quantity <= minThreshold), paginated' })
+  @ApiOkResponse({ description: '{ data: InventoryItem[], total, limit, offset } — default 25 per page' })
+  findLowStock(
+    @CurrentUser() user: any,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.inventoryService.findLowStock(user.tenantId, pagination);
   }
 
   @Post('inventory')
@@ -146,14 +153,16 @@ export class InventoryController {
   @Get('inventory/imports')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({
-    summary: 'List recent inventory import batches for the current pharmacy',
+    summary: 'List recent inventory import batches (paginated, newest first)',
     description:
-      'Returns up to 20 batches (CSV uploads, Smart Link runs, admin cascades), newest first. ' +
-      'Drives the upload-history sidebar so the user can see past results without re-uploading.',
+      'Returns CSV uploads, Smart Link runs and admin cascades. Drives the upload-history sidebar.',
   })
-  @ApiOkResponse({ description: 'Array of ImportBatch records' })
-  listImports(@CurrentUser() user: any) {
-    return this.importBatches.listForTenant(user.tenantId);
+  @ApiOkResponse({ description: '{ data: ImportBatch[], total, limit, offset } — default 25 per page' })
+  listImports(
+    @CurrentUser() user: any,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.importBatches.listForTenant(user.tenantId, pagination);
   }
 
   @Get('inventory/imports/:id')
@@ -195,16 +204,17 @@ export class InventoryController {
   @Get('inventory/:id/batches')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({
-    summary: 'List all batches/lots for an inventory item (FEFO order)',
-    description: 'Returns active batches sorted by soonest expiry date for traceability and dispensing.',
+    summary: 'List batches/lots for an inventory item (FEFO order, paginated)',
+    description: 'Active batches sorted by soonest expiry for traceability and dispensing.',
   })
-  @ApiOkResponse({ description: 'Array of ProductBatch records' })
+  @ApiOkResponse({ description: '{ data: ProductBatch[], total, limit, offset } — default 25 per page' })
   @ApiNotFoundResponse({ description: 'Inventory item not found' })
   listBatches(
     @CurrentUser() user: any,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query() pagination: PaginationQueryDto,
   ) {
-    return this.batchesService.listForItem(user.tenantId, id);
+    return this.batchesService.listForItem(user.tenantId, id, pagination);
   }
 
   @Post('inventory/:id/batches')
@@ -406,7 +416,7 @@ export class InventoryController {
   @ApiOkResponse({ description: '{ data: Product[], total: number }' })
   findAllProducts(
     @Query('search') search?: string,
-    @Query('take', new DefaultValuePipe(50), ParseIntPipe) take = 50,
+    @Query('take', new DefaultValuePipe(25), ParseIntPipe) take = 25,
     @Query('skip', new DefaultValuePipe(0),  ParseIntPipe) skip = 0,
   ) {
     return this.inventoryService.findAllProducts(search, take, skip);

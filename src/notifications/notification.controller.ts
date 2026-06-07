@@ -34,12 +34,12 @@ export class NotificationController {
   constructor(private readonly svc: NotificationService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Get notifications for the current user (last 30)' })
-  @ApiQuery({ name: 'limit', required: false, schema: { default: 30 } })
+  @ApiOperation({ summary: 'Get notifications for the current user (paginated)' })
+  @ApiQuery({ name: 'limit', required: false, schema: { default: 25, maximum: 100 } })
   @ApiOkResponse()
   find(
     @CurrentUser() user: any,
-    @Query('limit', new DefaultValuePipe(30), ParseIntPipe) limit: number,
+    @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
   ) {
     return this.svc.findForUser(user.tenantId, user.id, Math.min(limit, 100));
   }

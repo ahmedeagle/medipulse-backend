@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
 import { AiService } from './ai.service';
@@ -21,7 +21,7 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     // Order AND OrderItem must be registered together — Order.items is @OneToMany(() => OrderItem)
     TypeOrmModule.forFeature([AiRecommendation, AiAuditLog, RecommendationDecisionTrace, Order, OrderItem]),
     BullModule.registerQueue({ name: AI_RECOMMENDATIONS_QUEUE }),
-    InventoryModule,
+    forwardRef(() => InventoryModule),
     SupplierModule,
     ForecastingModule,
     RedisModule,

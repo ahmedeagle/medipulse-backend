@@ -37,6 +37,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
 import { AuditRead } from '../audit/decorators/audit-read.decorator';
 import { ProfileStatus } from './entities/supplier-profile.entity';
+import { PaginationQueryDto } from '../common/pagination/pagination-query.dto';
 
 class UpsertProfileDto {
   @IsString()  companyName:     string;
@@ -96,9 +97,9 @@ export class SupplierProfileController {
   @Get('all')
   @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
   @AuditRead('supplier_profiles')
-  @ApiOperation({ summary: 'Browse verified supplier profiles (pharmacy / chain admin)' })
-  findAll() {
-    return this.profileSvc.findAll('verified');
+  @ApiOperation({ summary: 'Browse verified supplier profiles (paginated, pharmacy / chain admin)' })
+  findAll(@Query() pagination: PaginationQueryDto) {
+    return this.profileSvc.findAll('verified', pagination);
   }
 
   @Get(':supplierTenantId')
@@ -121,9 +122,12 @@ export class SupplierProfileAdminController {
   constructor(private readonly profileSvc: SupplierProfileService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all supplier profiles (system admin)' })
-  findAll(@Query('status') status?: ProfileStatus) {
-    return this.profileSvc.findAll(status);
+  @ApiOperation({ summary: 'List supplier profiles (paginated, system admin)' })
+  findAll(
+    @Query('status') status?: ProfileStatus,
+    @Query() pagination?: PaginationQueryDto,
+  ) {
+    return this.profileSvc.findAll(status, pagination);
   }
 
   @Patch(':supplierTenantId/verify')

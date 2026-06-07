@@ -73,13 +73,20 @@ export class AiAuditStatsService {
     };
   }
 
-  async recent(tenantId: string, limit = 50): Promise<AiRunRow[]> {
-    const rows = await this.logs.find({
+  async recent(
+    tenantId: string,
+    limit = 25,
+    offset = 0,
+  ): Promise<{ data: AiRunRow[]; total: number; limit: number; offset: number }> {
+    const take = Math.min(Math.max(limit, 1), 200);
+    const skip = Math.max(offset, 0);
+    const [rows, total] = await this.logs.findAndCount({
       where: { pharmacyTenantId: tenantId },
       order: { createdAt: 'DESC' },
-      take:  Math.min(Math.max(limit, 1), 200),
+      take,
+      skip,
     });
-    return rows.map(r => ({
+    const data = rows.map(r => ({
       id:                       r.id,
       createdAt:                r.createdAt.toISOString(),
       model:                    r.model,
@@ -92,5 +99,6 @@ export class AiAuditStatsService {
       outputsBlocked:           r.outputsBlocked ?? 0,
       errorMessage:             r.errorMessage ?? null,
     }));
+    return { data, total, limit: take, offset: skip };
   }
 }

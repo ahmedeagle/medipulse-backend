@@ -21,6 +21,7 @@ import {
 import { AdminService } from './admin.service';
 import { DlqService } from './dlq.service';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { PaginationQueryDto } from '../common/pagination/pagination-query.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -38,10 +39,10 @@ export class AdminController {
   ) {}
 
   @Get('tenants')
-  @ApiOperation({ summary: 'Get all tenants with their user counts (system admin only)' })
-  @ApiOkResponse({ description: 'Returns all tenants with user count' })
-  findAllTenants() {
-    return this.adminService.findAllTenants();
+  @ApiOperation({ summary: 'Get tenants with user counts (paginated, system admin only)' })
+  @ApiOkResponse({ description: '{ data, total, limit, offset } — default 25 per page' })
+  findAllTenants(@Query() pagination: PaginationQueryDto) {
+    return this.adminService.findAllTenants(pagination);
   }
 
   @Post('tenants')
@@ -53,10 +54,10 @@ export class AdminController {
   }
 
   @Get('users')
-  @ApiOperation({ summary: 'Get all users across all tenants (system admin only)' })
-  @ApiOkResponse({ description: 'Returns all users with their tenant information' })
-  findAllUsers() {
-    return this.adminService.findAllUsers();
+  @ApiOperation({ summary: 'Get users across all tenants (paginated, system admin only)' })
+  @ApiOkResponse({ description: '{ data, total, limit, offset } — default 25 per page' })
+  findAllUsers(@Query() pagination: PaginationQueryDto) {
+    return this.adminService.findAllUsers(pagination);
   }
 
   @Patch('users/:id/deactivate')

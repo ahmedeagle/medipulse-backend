@@ -11,6 +11,11 @@ import { InventoryItem } from './entities/inventory-item.entity';
 import { ProductBatch } from './entities/product-batch.entity';
 import { CreateBatchDto } from './dto/create-batch.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
+import {
+  normalizePagination,
+  PaginatedResult,
+  PaginationQueryDto,
+} from '../common/pagination/pagination-query.dto';
 
 /**
  * Multi-batch inventory management.
@@ -37,8 +42,12 @@ export class BatchesService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  /** List all active batches for one inventory item, FEFO-ordered. */
-  async listForItem(tenantId: string, inventoryItemId: string): Promise<ProductBatch[]> {
+  /** List active batches for one inventory item, FEFO-ordered, paginated. */
+  async listForItem(
+    tenantId: string,
+    inventoryItemId: string,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<ProductBatch>> {
     const item = await this.inventoryRepo.findOne({
       where: { id: inventoryItemId, deletedAt: IsNull() },
     });
@@ -46,7 +55,8 @@ export class BatchesService {
     if (item.pharmacyTenantId !== tenantId) {
       throw new ForbiddenException('You do not have access to this inventory item');
     }
-    return this.batchRepo
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.batchRepo
       .createQueryBuilder('b')
       .where('b.inventoryItemId = :id', { id: item.id })
       .orderBy(
@@ -56,7 +66,10 @@ export class BatchesService {
       )
       .addOrderBy('b.expiryDate', 'ASC')
       .addOrderBy('b.createdAt', 'ASC')
-      .getMany();
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
   }
 
   /** Create a new batch and recompute the parent inventory aggregate. */

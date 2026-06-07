@@ -111,13 +111,22 @@ export class ImportBatchService {
   }
 
   /** List recent batches for a tenant — drives the upload-history sidebar. */
-  async listForTenant(tenantId: string, limit = 20): Promise<ImportBatch[]> {
-    return this.batchRepo
+  async listForTenant(
+    tenantId: string,
+    pagination: { limit?: number; offset?: number } = {},
+  ): Promise<{ data: ImportBatch[]; total: number; limit: number; offset: number }> {
+    const rawLimit = Number(pagination.limit ?? 25);
+    const rawOffset = Number(pagination.offset ?? 0);
+    const limit = Math.min(200, Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 25));
+    const offset = Math.max(0, Number.isFinite(rawOffset) ? Math.trunc(rawOffset) : 0);
+    const [data, total] = await this.batchRepo
       .createQueryBuilder('b')
       .where('b.tenantId = :tenantId', { tenantId })
       .orderBy('b.createdAt', 'DESC')
       .take(limit)
-      .getMany();
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
   }
 
   /**

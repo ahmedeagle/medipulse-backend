@@ -115,7 +115,7 @@ export class OrdersController {
   @ApiQuery({ name: 'supplierTenantId', required: false })
   @ApiQuery({ name: 'from',             required: false, description: 'ISO date' })
   @ApiQuery({ name: 'to',               required: false, description: 'ISO date' })
-  @ApiQuery({ name: 'take',             required: false, schema: { default: 50 } })
+  @ApiQuery({ name: 'take',             required: false, schema: { default: 25 } })
   @ApiQuery({ name: 'skip',             required: false, schema: { default: 0 } })
   findAll(
     @CurrentUser() user: any,
@@ -123,7 +123,7 @@ export class OrdersController {
     @Query('supplierTenantId') supplierTenantId?: string,
     @Query('from')             from?: string,
     @Query('to')               to?: string,
-    @Query('take', new DefaultValuePipe(50),  ParseIntPipe) take = 50,
+    @Query('take', new DefaultValuePipe(25),  ParseIntPipe) take = 25,
     @Query('skip', new DefaultValuePipe(0),   ParseIntPipe) skip = 0,
   ) {
     return this.ordersService.findAll(user, {

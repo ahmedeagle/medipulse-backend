@@ -44,6 +44,11 @@ class UpdateAgentSettingDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(1) minConfidence?: number | null;
 }
 
+class UpdateAgentPromptDto {
+  @IsOptional() systemPromptAr?: string | null;
+  @IsOptional() outputSchema?: Record<string, any>;
+}
+
 /**
  * AI Center HTTP surface — PRD §7. Mounted under /ai-center to keep the
  * Workforce / Approvals / Agents / Audit views under one cohesive URL
@@ -91,6 +96,45 @@ export class AiCenterController {
     @Body() body: UpdateAgentSettingDto,
   ) {
     return this.agents.setTenantSetting(user.tenantId, code, body, user.id ?? null);
+  }
+
+  // ── Agent definitions (PRD §13: prompt + schema view/edit) ─────────────
+
+  @Get('agents/:code/definition')
+  @Roles(Role.PHARMACY_ADMIN, Role.SYSTEM_ADMIN)
+  @ApiOperation({
+    summary: 'Full agent definition incl. Arabic system prompt, output schema and version',
+    description:
+      'Returns the effective definition for the caller\'s tenant — a tenant-scoped row overrides a global built-in with the same code.',
+  })
+  agentDefinition(
+    @CurrentUser() user: any,
+    @Param('code') code: string,
+  ) {
+    return this.agents.getDefinitionForTenant(user.tenantId, code);
+  }
+
+  @Patch('agents/:code/definition')
+  @Roles(Role.PHARMACY_ADMIN, Role.SYSTEM_ADMIN)
+  @ApiOperation({
+    summary: 'Edit agent prompt / output schema (bumps version for audit reproducibility)',
+    description:
+      'Built-in (global) agents can only be edited by SYSTEM_ADMIN. Pharmacy admins must fork to a tenant-scoped copy first (Phase 4b wizard).',
+  })
+  updateAgentDefinition(
+    @CurrentUser() user: any,
+    @Param('code') code: string,
+    @Body() body: UpdateAgentPromptDto,
+  ) {
+    const isPlatformAdmin =
+      Array.isArray(user.roles) && user.roles.includes(Role.SYSTEM_ADMIN);
+    return this.agents.updatePrompt(
+      user.tenantId,
+      code,
+      body,
+      user.id,
+      isPlatformAdmin,
+    );
   }
 
   // ── Approvals ───────────────────────────────────────────────────────────
@@ -213,7 +257,7 @@ export class AiCenterController {
   ) {
     return this.approvals.tenantEvents(
       user.tenantId,
-      Math.min(Number(limit) || 100, 500),
+      Math.min(Number(limit) || 25, 500),
       Math.max(Number(offset) || 0, 0),
     );
   }
@@ -229,8 +273,16 @@ export class AiCenterController {
   @Get('audit/ai-runs')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({ summary: 'Recent GPT generation attempts (most recent first)' })
-  aiRunsList(@CurrentUser() user: any, @Query('limit') limit?: string) {
-    return this.aiStats.recent(user.tenantId, Number(limit) || 50);
+  aiRunsList(
+    @CurrentUser() user: any,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.aiStats.recent(
+      user.tenantId,
+      Number(limit) || 25,
+      Number(offset) || 0,
+    );
   }
 
   @Get('agents/token-usage/today')

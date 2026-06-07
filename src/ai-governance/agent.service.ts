@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AgentDefinition } from './entities/agent-definition.entity';
@@ -93,5 +93,64 @@ export class AgentService {
       row.updatedByUserId = actorUserId;
     }
     return this.settings.save(row);
+  }
+
+  // ── PRD §13: Custom Agents Foundation (Phase 4a-1) ───────────────────
+
+  /**
+   * Resolve the AgentDefinition that applies for a given tenant + code.
+   * Tenant-scoped overrides take precedence over global built-ins, so a
+   * pharmacy can fork a built-in by creating a tenant row with the same code.
+   */
+  async resolveDefinition(tenantId: string, code: string): Promise<AgentDefinition> {
+    const tenantRow = await this.defs.findOne({
+      where: { code, tenantScope: 'tenant', tenantId },
+    });
+    if (tenantRow) return tenantRow;
+    const globalRow = await this.defs.findOne({
+      where: { code, tenantScope: 'global' },
+    });
+    if (!globalRow) throw new NotFoundException(`Agent ${code} not found`);
+    return globalRow;
+  }
+
+  /** Full definition (incl. prompt + schema) for the Agents-tab "edit" drawer. */
+  async getDefinitionForTenant(tenantId: string, code: string): Promise<AgentDefinition> {
+    return this.resolveDefinition(tenantId, code);
+  }
+
+  /**
+   * Edit an agent's Arabic system prompt. Bumps `version` so audit rows
+   * stamped with the prior version remain reproducible.
+   *
+   * Built-in (global) prompts can only be edited by platform admins — this
+   * service trusts the controller to enforce the role; we still refuse here
+   * if the caller's tenantId doesn't match a tenant-scoped row.
+   */
+  async updatePrompt(
+    tenantId: string,
+    code: string,
+    patch: { systemPromptAr?: string | null; outputSchema?: Record<string, any> },
+    actorUserId: string,
+    isPlatformAdmin: boolean,
+  ): Promise<AgentDefinition> {
+    const def = await this.resolveDefinition(tenantId, code);
+
+    if (def.tenantScope === 'global' && !isPlatformAdmin) {
+      throw new ForbiddenException(
+        'Editing built-in agent prompts requires platform admin. Create a tenant copy instead.',
+      );
+    }
+    if (def.tenantScope === 'tenant' && def.tenantId !== tenantId) {
+      throw new ForbiddenException('Cannot edit another tenant\'s agent definition');
+    }
+
+    if (patch.systemPromptAr !== undefined) def.systemPromptAr = patch.systemPromptAr;
+    if (patch.outputSchema   !== undefined) def.outputSchema   = patch.outputSchema;
+
+    def.version          = def.version + 1;
+    def.createdByUserId  = actorUserId;
+
+    return this.defs.save(def);
   }
 }

@@ -7,6 +7,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SupplierProfile, ProfileStatus } from './entities/supplier-profile.entity';
+import {
+  normalizePagination,
+  PaginatedResult,
+  PaginationQueryDto,
+} from '../common/pagination/pagination-query.dto';
 
 @Injectable()
 export class SupplierProfileService {
@@ -49,9 +54,19 @@ export class SupplierProfileService {
     return profile;
   }
 
-  async findAll(status?: ProfileStatus): Promise<SupplierProfile[]> {
+  async findAll(
+    status?: ProfileStatus,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<SupplierProfile>> {
+    const { limit, offset } = normalizePagination(pagination);
     const where = status ? { status } : {};
-    return this.repo.find({ where, order: { companyName: 'ASC' } });
+    const [data, total] = await this.repo.findAndCount({
+      where,
+      order: { companyName: 'ASC' },
+      take: limit,
+      skip: offset,
+    });
+    return { data, total, limit, offset };
   }
 
   /** Suppliers in a given delivery zone — used by demand signal queries */

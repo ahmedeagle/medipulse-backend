@@ -77,6 +77,51 @@ export class AgentDefinition {
   @Column({ type: 'varchar', length: 40, default: 'sparkles' })
   iconKey: string;
 
+  // ── PRD §13: Custom Agents Foundation (Phase 4a) ──────────────────────
+
+  /**
+   * Arabic system prompt template. NULL on legacy/hardcoded agents until they
+   * are migrated to the DynamicAgent runner. The runner stamps the resolved
+   * prompt + `version` on every audit row for full reproducibility.
+   */
+  @Column({ type: 'text', nullable: true })
+  systemPromptAr: string | null;
+
+  /** Declarative triggers (e.g. { "on": ["inventory.low_stock"] }). Free-form. */
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+  triggerRules: Record<string, any>;
+
+  /** What kind of approval this agent produces (recommendation / procurement_draft / …). */
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  outputSubjectType: string | null;
+
+  /** JSON Schema (draft-07) the runner uses to validate model output before approval. */
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+  outputSchema: Record<string, any>;
+
+  /** Bumped on every prompt/schema edit. Stamped on audit rows. */
+  @Column({ type: 'int', default: 1 })
+  version: number;
+
+  /** True when the row was created via API by an admin (not seeded). */
+  @Column({ type: 'boolean', default: false })
+  isCustom: boolean;
+
+  /** 'global' = built-in (one row per code), 'tenant' = scoped to one tenant. */
+  @Column({ type: 'varchar', length: 10, default: 'global' })
+  tenantScope: 'global' | 'tenant';
+
+  /** Required when tenantScope='tenant'. NULL for built-ins. */
+  @Column({ type: 'uuid', nullable: true })
+  tenantId: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  createdByUserId: string | null;
+
+  /** Optional pointer to the previous version (immutable history chain). */
+  @Column({ type: 'uuid', nullable: true })
+  parentDefinitionId: string | null;
+
   @CreateDateColumn() createdAt: Date;
   @UpdateDateColumn() updatedAt: Date;
 }

@@ -10,6 +10,11 @@ import { SupplierCatalogItem } from './entities/supplier-catalog-item.entity';
 import { CreateCatalogItemDto } from './dto/create-catalog-item.dto';
 import { UpdateCatalogItemDto } from './dto/update-catalog-item.dto';
 import { SupplierStockChangedEvent, EVENTS } from '../events/domain-events';
+import {
+  normalizePagination,
+  PaginatedResult,
+  PaginationQueryDto,
+} from '../common/pagination/pagination-query.dto';
 
 @Injectable()
 export class SupplierService {
@@ -19,18 +24,28 @@ export class SupplierService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async findMyCatalog(supplierTenantId: string): Promise<SupplierCatalogItem[]> {
-    return this.catalogRepository
+  async findMyCatalog(
+    supplierTenantId: string,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<SupplierCatalogItem>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.catalogRepository
       .createQueryBuilder('item')
       .leftJoinAndSelect('item.product', 'product')
       .where('item.supplierTenantId = :supplierTenantId', { supplierTenantId })
       .andWhere('item.deletedAt IS NULL')
       .orderBy('product.name', 'ASC')
-      .getMany();
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
   }
 
-  async findAllCatalog(): Promise<SupplierCatalogItem[]> {
-    return this.catalogRepository
+  async findAllCatalog(
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<SupplierCatalogItem>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const [data, total] = await this.catalogRepository
       .createQueryBuilder('item')
       .leftJoinAndSelect('item.supplierTenant', 'supplierTenant')
       .leftJoinAndSelect('item.product', 'product')
@@ -38,7 +53,10 @@ export class SupplierService {
       .andWhere('item.isAvailable = true')
       .orderBy('product.name', 'ASC')
       .addOrderBy('item.price', 'ASC')
-      .getMany();
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
   }
 
   /**

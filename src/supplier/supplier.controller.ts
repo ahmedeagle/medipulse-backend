@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import {
 import { SupplierService } from './supplier.service';
 import { CreateCatalogItemDto } from './dto/create-catalog-item.dto';
 import { UpdateCatalogItemDto } from './dto/update-catalog-item.dto';
+import { PaginationQueryDto } from '../common/pagination/pagination-query.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -39,14 +41,17 @@ export class SupplierController {
   @AuditRead('supplier_catalog')
   @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN)
   @ApiOperation({
-    summary: 'Get supplier catalog — pharmacy admin sees all available items; supplier admin sees their own',
+    summary: 'Get supplier catalog (paginated) — pharmacy admin sees all items, supplier admin sees their own',
   })
-  @ApiOkResponse({ description: 'Returns catalog items based on caller role' })
-  getCatalog(@CurrentUser() user: any) {
+  @ApiOkResponse({ description: '{ data, total, limit, offset } — default 25 per page' })
+  getCatalog(
+    @CurrentUser() user: any,
+    @Query() pagination: PaginationQueryDto,
+  ) {
     if (user.role === Role.SUPPLIER_ADMIN) {
-      return this.supplierService.findMyCatalog(user.tenantId);
+      return this.supplierService.findMyCatalog(user.tenantId, pagination);
     }
-    return this.supplierService.findAllCatalog();
+    return this.supplierService.findAllCatalog(pagination);
   }
 
   @Post('catalog')

@@ -5,6 +5,7 @@ import {
   Patch,
   Body,
   Param,
+  Query,
   UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
@@ -23,6 +24,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
 import { RecallType } from './entities/product-recall.entity';
+import { PaginationQueryDto } from '../common/pagination/pagination-query.dto';
 
 class CreateRecallBodyDto {
   @IsUUID()
@@ -56,10 +58,10 @@ export class ProductRecallController {
   constructor(private readonly recallSvc: ProductRecallService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all product recalls (system admin)' })
-  @ApiOkResponse()
-  findAll() {
-    return this.recallSvc.findAll();
+  @ApiOperation({ summary: 'List product recalls (paginated, system admin)' })
+  @ApiOkResponse({ description: '{ data, total, limit, offset } — default 25 per page' })
+  findAll(@Query() pagination: PaginationQueryDto) {
+    return this.recallSvc.findAll(pagination);
   }
 
   @Post()

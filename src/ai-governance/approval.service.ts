@@ -149,7 +149,7 @@ export class ApprovalService {
         END
       `, 'ASC')
       .addOrderBy('a.createdAt', 'DESC')
-      .take(q.limit ?? 50)
+      .take(q.limit ?? 25)
       .skip(q.offset ?? 0);
 
     if (q.status)      qb.andWhere('a.status = :s',      { s: q.status });

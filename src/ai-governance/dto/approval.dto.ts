@@ -56,7 +56,7 @@ export class ListApprovalsQueryDto {
   @ApiPropertyOptional() @IsOptional() @IsString()     subjectType?: string;
   @ApiPropertyOptional({ enum: APPROVAL_PRIORITIES })
   @IsOptional() @IsEnum(APPROVAL_PRIORITIES)           priority?: ApprovalPriority;
-  @ApiPropertyOptional({ default: 50 })
+  @ApiPropertyOptional({ default: 25 })
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(200) limit?: number;
   @ApiPropertyOptional({ default: 0 })
   @IsOptional() @Type(() => Number) @IsInt() @Min(0)   offset?: number;

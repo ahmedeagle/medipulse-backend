@@ -4,6 +4,8 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -95,6 +97,7 @@ export class AiService {
     private traceRepo: Repository<RecommendationDecisionTrace>,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
+    @Inject(forwardRef(() => InventoryService))
     private inventoryService: InventoryService,
     private supplierService: SupplierService,
     private supplierReliabilityService: SupplierReliabilityService,
@@ -200,7 +203,7 @@ export class AiService {
       // 1. Fetch data in parallel
       const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000);
 
-      const inventoryItems = await this.inventoryService.findAll(pharmacyTenantId);
+      const inventoryItems = await this.inventoryService.findAllForTenant(pharmacyTenantId);
       const pharmacyProductIds = inventoryItems.map((i) => i.productId);
 
       const [allCatalog, recentOrders] = await Promise.all([

@@ -34,6 +34,7 @@ import { ConfidenceEngine } from './governance/confidence.engine';
 import { AiRateLimiter } from './governance/rate-limiter';
 import { AiTokenBudget } from './governance/token-budget';
 import { getSystemPrompt, CURRENT_PROMPT_VERSION } from './governance/system-prompt';
+import { DynamicAgentRunner } from './governance/dynamic-agent-runner';
 import { AI_GENERATE_JOB, AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 import {
   RecommendationGeneratedEvent,
@@ -108,6 +109,7 @@ export class AiService {
     private readonly rateLimiter: AiRateLimiter,
     private readonly tokenBudget: AiTokenBudget,
     private readonly eventEmitter: EventEmitter2,
+    private readonly dynamicAgent: DynamicAgentRunner,
     @InjectQueue(AI_RECOMMENDATIONS_QUEUE)
     private readonly queue: Queue,
   ) {
@@ -297,7 +299,7 @@ export class AiService {
 
       for (let i = 0; i < rawRecs.length; i++) {
         const raw = rawRecs[i];
-        const { explanation, fromGpt } = explanationResults[i];
+        const { explanation, fromGpt, promptVersion: resolvedPromptVersion } = explanationResults[i];
 
         const suppliersAvailable = (allCatalog as any[]).filter(
           (c) => c.productId === raw.productId && c.isAvailable,
@@ -325,8 +327,10 @@ export class AiService {
           rulesTriggered: [raw.type],
           isDismissed: false,
           // Gap #5 — reproducibility: stamp model + prompt version on the row itself.
+          // PRD §13 — when a custom AgentDefinition is active, promptVersion will be
+          // "agent:<code>@v<N>" so auditors can pull the exact prompt snapshot used.
           modelVersion:  fromGpt ? AI_MODEL : null,
-          promptVersion: fromGpt ? CURRENT_PROMPT_VERSION : null,
+          promptVersion: fromGpt ? resolvedPromptVersion : null,
         });
 
         const result = await this.recommendationRepo.save(entity);
@@ -487,6 +491,7 @@ export class AiService {
     inputTokens: number;
     outputTokens: number;
     blocked: boolean;
+    promptVersion: string;
   }> {
     // Gap #3 — if no API key configured, ship the rules-only fallback. The
     // recommendation still goes out; only the explanation is deterministic.
@@ -494,6 +499,7 @@ export class AiService {
       return {
         explanation: this.fallbackExplanation(raw),
         fromGpt: false, inputTokens: 0, outputTokens: 0, blocked: false,
+        promptVersion: CURRENT_PROMPT_VERSION,
       };
     }
 
@@ -504,17 +510,26 @@ export class AiService {
       return {
         explanation: this.fallbackExplanation(raw),
         fromGpt: false, inputTokens: 0, outputTokens: 0, blocked: false,
+        promptVersion: CURRENT_PROMPT_VERSION,
       };
     }
 
     const prompt = this.buildPrompt(raw);
+
+    // PRD §13 Phase 4a-2 — DynamicAgent: if an admin has set a custom Arabic
+    // prompt for `inventory_expert` (the agent that owns reorder narration),
+    // use it and stamp `agent:<code>@v<N>` on the row. Otherwise fall back to
+    // the locked legacy prompt.
+    const dynamic = await this.dynamicAgent.resolve(tenantId, 'inventory_expert');
+    const systemPromptText = dynamic?.systemPrompt ?? getSystemPrompt('recommendation');
+    const resolvedPromptVersion = dynamic?.promptVersion ?? CURRENT_PROMPT_VERSION;
 
     const inputCheck = this.inputGuard.validate(prompt);
     if (!inputCheck.safe) {
       this.logger.warn(`[${tenantId}] InputGuard blocked: ${inputCheck.reason}`);
       this.eventEmitter.emit(
         EVENTS.AI_GOVERNANCE_BLOCKED,
-        new AiGovernanceBlockedEvent(tenantId, 'input', inputCheck.reason, CURRENT_PROMPT_VERSION),
+        new AiGovernanceBlockedEvent(tenantId, 'input', inputCheck.reason, resolvedPromptVersion),
       );
       return {
         explanation: this.fallbackExplanation(raw),
@@ -522,6 +537,7 @@ export class AiService {
         inputTokens: 0,
         outputTokens: 0,
         blocked: true,
+        promptVersion: resolvedPromptVersion,
       };
     }
 
@@ -529,7 +545,7 @@ export class AiService {
       const response = await this.openai.chat.completions.create({
         model: AI_MODEL,
         messages: [
-          { role: 'system', content: getSystemPrompt('recommendation') },
+          { role: 'system', content: systemPromptText },
           { role: 'user', content: prompt },
         ],
         max_tokens: 180,   // 120 was too tight for 2 sentences with specific numbers
@@ -548,7 +564,7 @@ export class AiService {
         this.logger.warn(`[${tenantId}] OutputGuard blocked GPT response`);
         this.eventEmitter.emit(
           EVENTS.AI_GOVERNANCE_BLOCKED,
-          new AiGovernanceBlockedEvent(tenantId, 'output', 'OutputGuard rejected response', CURRENT_PROMPT_VERSION),
+          new AiGovernanceBlockedEvent(tenantId, 'output', 'OutputGuard rejected response', resolvedPromptVersion),
         );
         return {
           explanation: this.fallbackExplanation(raw),
@@ -556,10 +572,18 @@ export class AiService {
           inputTokens,
           outputTokens,
           blocked: true,
+          promptVersion: resolvedPromptVersion,
         };
       }
 
-      return { explanation: safeOutput, fromGpt: true, inputTokens, outputTokens, blocked: false };
+      return {
+        explanation: safeOutput,
+        fromGpt: true,
+        inputTokens,
+        outputTokens,
+        blocked: false,
+        promptVersion: resolvedPromptVersion,
+      };
     } catch (error) {
       // Gap detection: OpenAI 429 means we're being rate-limited — don't burn
       // BullMQ retry budget hammering them. Just fall back deterministically.
@@ -575,6 +599,7 @@ export class AiService {
         inputTokens: 0,
         outputTokens: 0,
         blocked: false,
+        promptVersion: resolvedPromptVersion,
       };
     }
   }

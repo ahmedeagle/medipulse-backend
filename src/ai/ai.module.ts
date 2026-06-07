@@ -12,6 +12,8 @@ import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { AiRateLimiter } from './governance/rate-limiter';
 import { AiTokenBudget } from './governance/token-budget';
+import { DynamicAgentRunner } from './governance/dynamic-agent-runner';
+import { AgentDefinition } from '../ai-governance/entities/agent-definition.entity';
 import { RedisModule } from '../common/redis/redis.module';
 import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 
@@ -19,7 +21,14 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
   imports: [
     // Order AND OrderItem must be registered together — Order.items is @OneToMany(() => OrderItem)
     // and TypeORM needs both entities in the same metadata pool to resolve the relationship.
-    TypeOrmModule.forFeature([AiRecommendation, AiAuditLog, RecommendationDecisionTrace, Order, OrderItem]),
+    TypeOrmModule.forFeature([
+      AiRecommendation,
+      AiAuditLog,
+      RecommendationDecisionTrace,
+      Order,
+      OrderItem,
+      AgentDefinition,
+    ]),
     BullModule.registerQueue({ name: AI_RECOMMENDATIONS_QUEUE }),
     forwardRef(() => InventoryModule),
     SupplierModule,
@@ -27,7 +36,7 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     RedisModule,
   ],
   controllers: [],
-  providers: [AiService, AiRateLimiter, AiTokenBudget],
+  providers: [AiService, AiRateLimiter, AiTokenBudget, DynamicAgentRunner],
   exports: [AiService, AiTokenBudget],
 })
 export class AiModule {}

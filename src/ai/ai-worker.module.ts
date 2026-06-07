@@ -13,19 +13,28 @@ import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { AiRateLimiter } from './governance/rate-limiter';
 import { AiTokenBudget } from './governance/token-budget';
+import { DynamicAgentRunner } from './governance/dynamic-agent-runner';
+import { AgentDefinition } from '../ai-governance/entities/agent-definition.entity';
 import { RedisModule } from '../common/redis/redis.module';
 import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 
 @Module({
   imports: [
     // Order AND OrderItem must be registered together — Order.items is @OneToMany(() => OrderItem)
-    TypeOrmModule.forFeature([AiRecommendation, AiAuditLog, RecommendationDecisionTrace, Order, OrderItem]),
+    TypeOrmModule.forFeature([
+      AiRecommendation,
+      AiAuditLog,
+      RecommendationDecisionTrace,
+      Order,
+      OrderItem,
+      AgentDefinition,
+    ]),
     BullModule.registerQueue({ name: AI_RECOMMENDATIONS_QUEUE }),
     forwardRef(() => InventoryModule),
     SupplierModule,
     ForecastingModule,
     RedisModule,
   ],
-  providers: [AiService, AiRateLimiter, AiTokenBudget, AiGenerationProcessor],
+  providers: [AiService, AiRateLimiter, AiTokenBudget, DynamicAgentRunner, AiGenerationProcessor],
 })
 export class AiWorkerModule {}

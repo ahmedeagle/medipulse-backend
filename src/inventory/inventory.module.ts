@@ -15,6 +15,7 @@ import { ImportBatchService } from './import-batch.service';
 import { CatalogApprovalExecutor } from './catalog-approval.executor';
 import { ExpiredInventoryCron } from './expired-inventory.cron';
 import { LowStockCron } from './low-stock.cron';
+import { LostRevenueCron } from './lost-revenue.cron';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
 import { ConsumptionSnapshot } from './entities/consumption-snapshot.entity';
@@ -41,7 +42,7 @@ import { MATCH_QUEUE } from './match.constants';
     NotificationsModule,
   ],
   controllers: [InventoryController, ProductRecallController],
-  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron],
+  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron, LostRevenueCron],
   exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, TypeOrmModule],
 })
 export class InventoryModule {}

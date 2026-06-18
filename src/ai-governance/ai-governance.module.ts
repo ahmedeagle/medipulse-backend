@@ -38,6 +38,7 @@ import { ExpiryLiquidationCron }       from '../p2p-listing/expiry-liquidation.c
 import { ExpiryLiquidationExecutor }   from './executors/expiry-liquidation.executor';
 import { LowStockExecutor }            from './executors/low-stock.executor';
 import { DeadStockExecutor }           from './executors/dead-stock.executor';
+import { LostRevenueExecutor }         from './executors/lost-revenue.executor';
 
 /**
  * PRD v2 — AI Governance module.
@@ -90,6 +91,7 @@ import { DeadStockExecutor }           from './executors/dead-stock.executor';
     ExpiryLiquidationExecutor,
     LowStockExecutor,
     DeadStockExecutor,
+    LostRevenueExecutor,
     // Background monitor crons
     P2pOrderMonitorCron,
     ExpiryLiquidationCron,

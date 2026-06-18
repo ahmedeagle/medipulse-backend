@@ -215,6 +215,16 @@ export class InventoryService {
         quantity:        dto.quantity ?? 0,
         minThreshold:    threshold,
       });
+      // Stockout: quantity = 0 → LostRevenueCron creates lost-revenue task immediately
+      if ((dto.quantity ?? 0) === 0) {
+        this.eventEmitter.emit(EVENTS.INVENTORY_STOCKOUT_DETECTED, {
+          tenantId,
+          inventoryItemId:  saved.id,
+          productId:        dto.productId,
+          productNameAr,
+          previousQuantity: 0,
+        });
+      }
     }
 
     // Near expiry: expiry date within 90 days (conservative default — settings read by cron later)
@@ -338,6 +348,16 @@ export class InventoryService {
           quantity:        dto.quantity,
           minThreshold:    threshold,
         });
+        // Stockout: quantity just hit 0 → LostRevenueCron creates lost-revenue task immediately
+        if (dto.quantity === 0 && previousQuantity > 0) {
+          this.eventEmitter.emit(EVENTS.INVENTORY_STOCKOUT_DETECTED, {
+            tenantId,
+            inventoryItemId:  id,
+            productId:        item.productId,
+            productNameAr,
+            previousQuantity,
+          });
+        }
       }
     }
 

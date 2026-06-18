@@ -182,6 +182,7 @@ export const EVENTS = {
   BATCH_EXPIRY_ALERT:           'batch.expiry_alert',
   INVENTORY_NEAR_EXPIRY_DETECTED: 'inventory.near_expiry_detected',
   INVENTORY_LOW_STOCK_DETECTED:   'inventory.low_stock_detected',
+  INVENTORY_STOCKOUT_DETECTED:    'inventory.stockout_detected',
 } as const;
 
 // ── P2P / Pharmacy Exchange Network events ────────────────────────────────────

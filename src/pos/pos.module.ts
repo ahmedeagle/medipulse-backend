@@ -11,6 +11,7 @@ import { PosInsuranceCompany }   from './entities/pos-insurance-company.entity';
 import { PosService }                  from './pos.service';
 import { PosController }               from './pos.controller';
 import { PosIntegrityMonitorCron }     from './pos-integrity-monitor.cron';
+import { MissedDemandService }         from '../inventory/missed-demand.service';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { PosIntegrityMonitorCron }     from './pos-integrity-monitor.cron';
       PosCashMovement, PosCustomer, PosInsuranceCompany,
     ]),
   ],
-  providers:   [PosService, PosIntegrityMonitorCron],
+  providers:   [PosService, PosIntegrityMonitorCron, MissedDemandService],
   controllers: [PosController],
   exports:     [PosService],
 })

@@ -12,6 +12,7 @@ import {
   CreateTransactionDto, CashMovementDto,
   UpsertCustomerDto, UpsertInsuranceCompanyDto,
 } from './pos.service';
+import { MissedDemandService } from '../inventory/missed-demand.service';
 
 function tenantId(req: any): string {
   return req.user?.pharmacyTenantId ?? req.user?.tenantId;
@@ -28,7 +29,10 @@ function cashierName(req: any): string {
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.PHARMACY_ADMIN)
 export class PosController {
-  constructor(private readonly pos: PosService) {}
+  constructor(
+    private readonly pos:           PosService,
+    private readonly missedDemand:  MissedDemandService,
+  ) {}
 
   // ── Shifts ────────────────────────────────────────────────────────────────
 
@@ -157,6 +161,30 @@ export class PosController {
     @Query('offset') offset = 0,
   ) {
     return this.pos.getCustomerTransactions(tenantId(req), id, +limit, +offset);
+  }
+
+  // ── Missed demand ─────────────────────────────────────────────────────────
+
+  @Post('missed-sale')
+  @HttpCode(HttpStatus.CREATED)
+  logMissedSale(
+    @Request() req: any,
+    @Body() body: {
+      productId?:    string;
+      productName:   string;
+      quantity?:     number;
+      sellingPrice?: number;
+    },
+  ) {
+    return this.missedDemand.logMiss(tenantId(req), { ...body, source: 'pos_manual' });
+  }
+
+  @Get('missed-demand/report')
+  getMissedDemandReport(
+    @Request() req: any,
+    @Query('days') days = 30,
+  ) {
+    return this.missedDemand.getReport(tenantId(req), +days);
   }
 
   // ── Product search ────────────────────────────────────────────────────────

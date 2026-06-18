@@ -17,6 +17,18 @@ export interface RawRecommendation {
   payload: Record<string, any>;
 }
 
+export interface P2pListingSlim {
+  id: string;
+  sellerTenantId: string;
+  productId: string;
+  price: number;
+  quantity: number;
+  minOrderQty: number;
+  expiryDate: Date | null;
+  listingType: string;
+  discountPct: number | null;
+}
+
 export interface RulesEngineContext {
   /** Map supplierTenantId → score (optional) */
   supplierScores?: Map<string, SupplierReliabilityScore>;
@@ -28,6 +40,8 @@ export interface RulesEngineContext {
   scheduleData?: Map<string, ProcurementSchedule>;
   /** Region for regional demand signals */
   region?: string;
+  /** Active P2P listings from other pharmacies — used for SMART_PROCUREMENT rule */
+  p2pListings?: P2pListingSlim[];
 }
 
 // ─── Seasonality Engine — Hijri calendar-based (replaces hardcoded SEASONAL_RULES) ─
@@ -334,9 +348,10 @@ export class RulesEngine {
             productId: item.productId,
             riskLevel: 'LOW',
             payload: {
-              productId: item.productId,
-              productName: item.product?.name ?? 'Unknown',
-              currentQuantity: item.quantity,
+              inventoryItemId:     item.id,
+              productId:           item.productId,
+              productName:         item.product?.name ?? 'Unknown',
+              currentQuantity:     item.quantity,
               weeksWithoutMovement: snapshots.length,
             },
           });
@@ -432,6 +447,168 @@ export class RulesEngine {
             },
           });
         }
+      }
+    }
+
+    // ── Rule 7b: Expired Quarantine — items past expiry date still in stock ─────
+    for (const item of inventoryItems) {
+      if (!item.expiryDate || item.quantity <= 0) continue;
+      const expiry = new Date(item.expiryDate);
+      if (expiry >= today) continue; // not expired yet
+
+      const daysPastExpiry = Math.floor((Date.now() - expiry.getTime()) / 86_400_000);
+      recs.push({
+        type: RecommendationType.EXPIRED_QUARANTINE,
+        productId: item.productId,
+        riskLevel: 'HIGH',
+        payload: {
+          inventoryItemId: item.id,
+          productId: item.productId,
+          productName: item.product?.name ?? 'Unknown',
+          productNameAr: (item.product as any)?.nameAr ?? null,
+          quantity: item.quantity,
+          expiryDate: item.expiryDate,
+          daysPastExpiry,
+          action: 'quarantine_and_remove',
+          deepLink: `/pharmacy/inventory?filter=expired`,
+        },
+      });
+    }
+
+    // ── Rule 8: P2P Listing Suggestion — near-expiry or dead stock → list on PEN ─
+    const DAY_MS = 86_400_000;
+    const now90  = new Date(Date.now() + 90 * DAY_MS);
+    const now60  = new Date(Date.now() + 60 * DAY_MS);
+    const now30  = new Date(Date.now() + 30 * DAY_MS);
+
+    for (const item of inventoryItems) {
+      if (!item.expiryDate || item.quantity <= 0) continue;
+      const expiry = new Date(item.expiryDate);
+      if (expiry <= today) continue; // already expired — skip, can't list
+      if (expiry > now90) continue;  // more than 90 days away — no urgency yet
+
+      const daysLeft = Math.floor((expiry.getTime() - Date.now()) / DAY_MS);
+
+      // Skip if a dead-stock rule was already generated for this item (don't double-alert)
+      const alreadyHasDeadStock = recs.some(
+        (r) => r.type === RecommendationType.DEAD_STOCK_ALERT && r.productId === item.productId,
+      );
+
+      let riskLevel: RiskLevel;
+      let discountPct: number;
+      let listingType: 'clearance' | 'emergency';
+
+      if (expiry <= now30) {
+        riskLevel   = 'HIGH';
+        discountPct = 20;
+        listingType = 'clearance';
+      } else if (expiry <= now60) {
+        riskLevel   = 'HIGH';
+        discountPct = 15;
+        listingType = 'clearance';
+      } else {
+        riskLevel   = 'MEDIUM';
+        discountPct = 10;
+        listingType = 'clearance';
+      }
+
+      recs.push({
+        type: RecommendationType.P2P_LISTING_SUGGESTION,
+        productId: item.productId,
+        riskLevel,
+        payload: {
+          inventoryItemId:    item.id,
+          productId:          item.productId,
+          productName:        item.product?.name ?? 'Unknown',
+          productNameAr:      (item.product as any)?.nameAr ?? null,
+          quantity:           item.quantity,
+          expiryDate:         item.expiryDate,
+          daysLeft,
+          suggestedListingType: listingType,
+          suggestedDiscountPct: discountPct,
+          alreadyHasDeadStock,
+          action: 'list_on_p2p',
+          deepLink: `/pharmacy/p2p?tab=sell&openAdd=1&itemId=${item.id}`,
+        },
+      });
+    }
+
+    // ── Rule 9: SMART_PROCUREMENT — P2P price beats supplier for a low-stock item ─
+    // Detects: "another pharmacy has your low-stock product listed on the P2P
+    // marketplace cheaper than any supplier".
+    const { p2pListings = [] } = ctx;
+    if (p2pListings.length > 0) {
+      const p2pByProduct = new Map<string, P2pListingSlim[]>();
+      for (const l of p2pListings) {
+        if (!p2pByProduct.has(l.productId)) p2pByProduct.set(l.productId, []);
+        p2pByProduct.get(l.productId)!.push(l);
+      }
+
+      // Only fire for items already triggering REORDER (avoids double-alerting healthy stock)
+      const reorderProductIds = new Set(
+        recs.filter(r => r.type === RecommendationType.REORDER).map(r => r.productId),
+      );
+
+      for (const item of inventoryItems) {
+        if (!item.productId) continue;
+        if (!reorderProductIds.has(item.productId)) continue;
+
+        const p2pOptions = p2pByProduct.get(item.productId) ?? [];
+        if (!p2pOptions.length) continue;
+
+        // Pick the cheapest available P2P listing with enough quantity
+        const deficit = Math.max(1, Number(item.minThreshold ?? 0) - Number(item.quantity ?? 0));
+        const viable  = p2pOptions
+          .filter(l => Number(l.quantity) >= Number(l.minOrderQty))
+          .sort((a, b) => Number(a.price) - Number(b.price));
+        if (!viable.length) continue;
+        const best = viable[0];
+        const p2pPrice = Number(best.price);
+
+        // Compare against cheapest available supplier
+        const supplierOptions = (catalogByProduct.get(item.productId) ?? []).filter(l => l.isAvailable);
+        const cheapestSupplierPrice = supplierOptions.length
+          ? Math.min(...supplierOptions.map(l => Number(l.price)))
+          : Infinity;
+
+        // Only recommend if P2P is meaningfully cheaper (>5%) or no supplier at all
+        const saving = cheapestSupplierPrice < Infinity
+          ? (cheapestSupplierPrice - p2pPrice) / cheapestSupplierPrice
+          : 1;
+        if (saving < 0.05 && cheapestSupplierPrice < Infinity) continue;
+
+        const savingsPct = cheapestSupplierPrice < Infinity
+          ? Math.round(saving * 100)
+          : 0;
+
+        recs.push({
+          type:      RecommendationType.SMART_PROCUREMENT,
+          productId: item.productId,
+          riskLevel: Number(item.quantity ?? 0) === 0 ? 'HIGH' : 'MEDIUM',
+          payload: {
+            productId:    item.productId,
+            productName:  item.product?.name ?? 'Unknown',
+            productNameAr: (item.product as any)?.nameAr ?? null,
+            currentQuantity: Number(item.quantity ?? 0),
+            minThreshold: Number(item.minThreshold ?? 0),
+            deficit,
+            bestListing: {
+              listingId:       best.id,
+              sellerTenantId:  best.sellerTenantId,
+              price:           p2pPrice,
+              quantity:        Number(best.quantity),
+              minOrderQty:     Number(best.minOrderQty),
+              listingType:     best.listingType,
+              discountPct:     best.discountPct,
+              expiryDate:      best.expiryDate,
+            },
+            p2pPrice,
+            supplierPrice:  cheapestSupplierPrice < Infinity ? cheapestSupplierPrice : null,
+            savingsPct,
+            totalListings:  p2pOptions.length,
+            deepLink:       `/pharmacy/p2p?tab=buy&productId=${item.productId}`,
+          },
+        });
       }
     }
 

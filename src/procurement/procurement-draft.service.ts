@@ -17,6 +17,7 @@ import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { OrderStatus } from '../common/enums/order-status.enum';
 import { RecommendationType } from '../common/enums/recommendation-type.enum';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 @Injectable()
 export class ProcurementDraftService {
@@ -38,6 +39,7 @@ export class ProcurementDraftService {
     @InjectRepository(OrderItem)
     private readonly orderItemRepo: Repository<OrderItem>,
     private readonly dataSource: DataSource,
+    private readonly pharmacySettingsService: PharmacySettingsService,
   ) {}
 
   // ─── Auto-generate draft from a HIGH-risk recommendation ─────────────────
@@ -89,7 +91,8 @@ export class ProcurementDraftService {
     }, null as SupplierCatalogItem | null);
 
     const suggestedQty = rec.payload?.suggestedReorderQty ?? rec.payload?.deficit ?? 10;
-    const urgencyLevel: UrgencyLevel = 'critical';
+    const urgencyLevel: UrgencyLevel =
+      rec.riskLevel === 'HIGH' ? 'critical' : rec.riskLevel === 'MEDIUM' ? 'high' : 'medium';
     const expiresAt = new Date(Date.now() + 48 * 3_600_000);
 
     const draft = this.draftRepo.create({
@@ -127,6 +130,9 @@ export class ProcurementDraftService {
     expiringStock: InventoryItem[];
     pendingOrders: Order[];
   }> {
+    const settings = await this.pharmacySettingsService.getSettings(pharmacyTenantId);
+    const alertDays = settings.inventorySettings?.expiryAlertDays ?? 90;
+
     const [criticalDrafts, expiringStock, pendingOrders] = await Promise.all([
       this.findPending(pharmacyTenantId),
       this.inventoryRepo
@@ -135,7 +141,7 @@ export class ProcurementDraftService {
         .where('i.pharmacyTenantId = :pharmacyTenantId', { pharmacyTenantId })
         .andWhere('i.deletedAt IS NULL')
         .andWhere('i.expiryDate IS NOT NULL')
-        .andWhere('i.expiryDate <= NOW() + INTERVAL \'30 days\'')
+        .andWhere(`i.expiryDate <= NOW() + INTERVAL '${alertDays} days'`)
         .andWhere('i.expiryDate > NOW()')
         .orderBy('i.expiryDate', 'ASC')
         .getMany(),

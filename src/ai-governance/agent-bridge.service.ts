@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository, DataSource } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
@@ -12,6 +12,7 @@ import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Product } from '../inventory/entities/product.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
+import { AiService } from '../ai/ai.service';
 import {
   EVENTS,
   RecommendationGeneratedEvent,
@@ -45,23 +46,93 @@ export class AgentBridgeService {
     @InjectRepository(Approval)         private readonly approvalRepo: Repository<Approval>,
     @InjectRepository(SupplierCatalogItem) private readonly catalogRepo: Repository<SupplierCatalogItem>,
     private readonly approvals: ApprovalService,
+    private readonly aiService: AiService,
+    private readonly dataSource: DataSource,
   ) {}
 
   // ── 1) Inventory Expert: react to AI recommendations ────────────────────
 
   @OnEvent(EVENTS.RECOMMENDATION_GENERATED)
   async onRecommendationGenerated(ev: RecommendationGeneratedEvent): Promise<void> {
-    if (ev.type !== RecommendationType.REORDER) return;
+    const handledTypes = [
+      RecommendationType.REORDER,
+      RecommendationType.DEAD_STOCK_ALERT,
+      RecommendationType.P2P_LISTING_SUGGESTION,
+      RecommendationType.EXPIRED_QUARANTINE,
+      RecommendationType.SMART_PROCUREMENT,
+    ];
+    if (!handledTypes.includes(ev.type as any)) return;
     try {
       const rec = await this.recRepo.findOne({
         where: { id: ev.recommendationId, pharmacyTenantId: ev.tenantId },
         relations: ['product'],
       });
       if (!rec) return;
-      await this.ensureApprovalForRecommendation(rec);
+
+      if (ev.type === RecommendationType.REORDER) {
+        await this.ensureApprovalForRecommendation(rec);
+      } else if (ev.type === RecommendationType.SMART_PROCUREMENT) {
+        await this.ensureSmartProcurementApproval(rec);
+      } else if (
+        ev.type === RecommendationType.P2P_LISTING_SUGGESTION ||
+        ev.type === RecommendationType.DEAD_STOCK_ALERT ||
+        ev.type === RecommendationType.EXPIRED_QUARANTINE
+      ) {
+        await this.ensureRiskApprovalForRecommendation(rec);
+      }
     } catch (err) {
       this.logger.error(`onRecommendationGenerated failed: ${(err as Error).message}`);
     }
+  }
+
+  private async ensureRiskApprovalForRecommendation(rec: AiRecommendation): Promise<void> {
+    const exists = await this.approvalRepo.findOne({
+      where: { tenantId: rec.pharmacyTenantId, subjectType: 'recommendation', subjectId: rec.id },
+    });
+    if (exists) return;
+
+    const productName = rec.product?.nameAr || rec.product?.name || 'منتج';
+    const priority = rec.riskLevel === 'HIGH' ? 'critical' : rec.riskLevel === 'MEDIUM' ? 'high' : 'medium';
+
+    const isExpiry = rec.type === RecommendationType.P2P_LISTING_SUGGESTION;
+    const daysLeft  = Number(rec.payload?.daysLeft ?? 0);
+    const quantity  = Number(rec.payload?.quantity ?? 0);
+    const discountPct = Number(rec.payload?.suggestedDiscountPct ?? 0);
+    const deepLink  = rec.payload?.deepLink as string | undefined;
+
+    const title = isExpiry
+      ? `انتهاء قريب: ${productName} — ${daysLeft} يوم`
+      : `مخزون راكد: ${productName}`;
+
+    const summaryParts: string[] = [];
+    if (isExpiry) {
+      summaryParts.push(`الكمية: ${quantity} وحدة`);
+      summaryParts.push(`تنتهي خلال ${daysLeft} يوم`);
+      if (discountPct > 0) summaryParts.push(`خصم مقترح ${discountPct}%`);
+      summaryParts.push('الإجراء: إدراج في البيع للصيدليات');
+    } else {
+      summaryParts.push(`الكمية: ${quantity || Number(rec.payload?.currentQuantity ?? 0)} وحدة`);
+      summaryParts.push('لا توجد حركة بيع منذ أكثر من 60 يوماً');
+      summaryParts.push('يُنصح بتصفية أو بيعه للصيدليات الأخرى');
+    }
+
+    await this.approvals.create(rec.pharmacyTenantId, {
+      agentCode:        'inventory_expert',
+      subjectType:      'recommendation',
+      subjectId:        rec.id,
+      title,
+      summary:          summaryParts.join(' · '),
+      rationale:        isExpiry
+        ? `المنتج يقترب من تاريخ الانتهاء. البيع الآن بخصم ${discountPct}% أفضل من الخسارة الكاملة.`
+        : 'لم يتحرك هذا المنتج في المخزون منذ فترة طويلة. قد يكون مرشحاً للتصفية أو البيع.',
+      confidence:       0.85,
+      priority:         priority as any,
+      payload:          { ...rec.payload, deepLink, recType: rec.type },
+      confidenceReason: isExpiry
+        ? `مبنية على تاريخ الانتهاء الفعلي المسجل في المخزون وسياسة حماية القيمة.`
+        : `مبنية على تحليل حركة المخزون خلال الفترة الأخيرة.`,
+      expiresAt:        new Date(Date.now() + (isExpiry ? daysLeft * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000)).toISOString(),
+    });
   }
 
   private async ensureApprovalForRecommendation(rec: AiRecommendation): Promise<void> {
@@ -112,6 +183,38 @@ export class AgentBridgeService {
         ? `مبنية على ثبات نمط المبيعات لـ 60 يوماً (متوسط ${daily.toFixed(1)} وحدة يومياً) والمخزون الفعلي الحالي.`
         : `مبنية على المخزون الحالي وعتبة إعادة الطلب المحددة للمنتج.`,
       expiresAt:       new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+    });
+  }
+
+  private async ensureSmartProcurementApproval(rec: AiRecommendation): Promise<void> {
+    const exists = await this.approvalRepo.findOne({
+      where: { tenantId: rec.pharmacyTenantId, subjectType: 'recommendation', subjectId: rec.id },
+    });
+    if (exists) return;
+
+    const productName  = rec.product?.nameAr || rec.product?.name || 'منتج';
+    const p2pPrice     = Number(rec.payload?.p2pPrice ?? 0);
+    const suppPrice    = rec.payload?.supplierPrice ? Number(rec.payload.supplierPrice) : null;
+    const savingsPct   = Number(rec.payload?.savingsPct ?? 0);
+    const totalListings = Number(rec.payload?.totalListings ?? 1);
+    const deepLink     = rec.payload?.deepLink as string | undefined;
+
+    const priceNote    = suppPrice
+      ? `سعر البورصة: ${p2pPrice.toFixed(2)} جنيه (توفير ${savingsPct}% مقارنةً بالمورد)`
+      : `سعر البورصة: ${p2pPrice.toFixed(2)} جنيه`;
+
+    await this.approvals.create(rec.pharmacyTenantId, {
+      agentCode:        'inventory_expert',
+      subjectType:      'recommendation',
+      subjectId:        rec.id,
+      title:            `شراء أسرع وأرخص: ${productName} متوفر في البورصة`,
+      summary:          `${priceNote} — ${totalListings} عرض متاح. الكمية الناقصة: ${rec.payload?.deficit ?? '؟'} وحدة.`,
+      rationale:        `مخزونك من ${productName} وصل للحد الأدنى. صيدلية أخرى تبيعه في البورصة الدوائية بسعر أفضل وبسرعة أكبر من الموردين التقليديين.${savingsPct > 0 ? ` ستوفر ${savingsPct}% مقارنةً بأرخص مورد متاح.` : ''}`,
+      confidence:       0.80,
+      priority:         rec.riskLevel === 'HIGH' ? 'critical' : 'high',
+      payload:          { ...rec.payload, recType: rec.type, deepLink },
+      confidenceReason: `مبنية على مقارنة مباشرة بين سعر البورصة الحالي وسعر أرخص مورد متاح لنفس المنتج.`,
+      expiresAt:        new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
     });
   }
 
@@ -341,18 +444,174 @@ export class AgentBridgeService {
     });
   }
 
-  // ── Recommendation acknowledgement (no domain side-effect) ──────────────
+  // ── Recommendation approval — dispatch by recommendation type ──────────────
 
   @OnEvent('approval.approved')
   async onApproved(approval: Approval): Promise<void> {
     if (approval.subjectType !== 'recommendation') return;
     try {
-      await this.approvals.markExecuted(approval.tenantId, approval.id, {
-        note: 'acknowledged',
+      const rec = await this.recRepo.findOne({
+        where: { id: approval.subjectId, pharmacyTenantId: approval.tenantId },
+        relations: ['product'],
       });
+      if (!rec) {
+        await this.approvals.markExecuted(approval.tenantId, approval.id, { note: 'rec_not_found' });
+        return;
+      }
+      switch (rec.type as string) {
+        case RecommendationType.REORDER:
+          await this.executeReorder(approval, rec);
+          break;
+        case RecommendationType.SMART_PROCUREMENT:
+          await this.executeSmartProcurement(approval, rec);
+          break;
+        case RecommendationType.P2P_LISTING_SUGGESTION:
+        case RecommendationType.DEAD_STOCK_ALERT:
+          await this.executeP2pListing(approval, rec);
+          break;
+        case RecommendationType.EXPIRED_QUARANTINE:
+          await this.executeQuarantine(approval, rec);
+          break;
+        default:
+          await this.approvals.markExecuted(approval.tenantId, approval.id, { note: 'acknowledged' });
+      }
     } catch (err) {
-      this.logger.warn(`mark executed (recommendation) failed: ${(err as Error).message}`);
+      this.logger.warn(`onApproved (recommendation) failed: ${(err as Error).message}`);
     }
+  }
+
+  private async executeSmartProcurement(approval: Approval, rec: AiRecommendation): Promise<void> {
+    // Approving SMART_PROCUREMENT = user wants to buy from the P2P listing.
+    // We mark executed and return the deep-link so the frontend can navigate there.
+    const deepLink   = rec.payload?.deepLink as string | undefined ?? '/pharmacy/p2p?tab=buy';
+    const productId  = rec.productId ?? (rec.payload?.productId as string | undefined);
+    const listingId  = rec.payload?.bestListing?.listingId as string | undefined;
+
+    await this.approvals.markExecuted(approval.tenantId, approval.id, {
+      action:    'navigate_to_p2p_marketplace',
+      deepLink:  listingId
+        ? `/pharmacy/p2p?tab=buy&productId=${productId}&highlightListing=${listingId}`
+        : deepLink,
+      productId,
+      listingId,
+    });
+    this.logger.log(`SMART_PROCUREMENT approved for product ${productId} → user directed to P2P marketplace`);
+  }
+
+  private async executeReorder(approval: Approval, rec: AiRecommendation): Promise<void> {
+    const productId = rec.productId ?? (rec.payload?.productId as string | undefined);
+    if (!productId) throw new Error('No productId on recommendation');
+
+    // Find cheapest available supplier
+    const [catalog] = await this.catalogRepo.find({
+      where: { productId, isAvailable: true },
+      order: { price: 'ASC' },
+      take: 1,
+    });
+
+    if (!catalog) {
+      await this.approvals.markExecuted(approval.tenantId, approval.id, {
+        warning: 'لم يتم العثور على مورد متاح — تحقق من كتالوج الموردين',
+      });
+      return;
+    }
+
+    const quantity = Math.max(
+      1,
+      Math.round(Number(
+        rec.payload?.deficit ??
+        rec.payload?.suggestedReorderQty ??
+        rec.payload?.minThreshold ??
+        10,
+      )),
+    );
+
+    const draft = this.draftRepo.create({
+      pharmacyTenantId: approval.tenantId,
+      supplierTenantId: catalog.supplierTenantId,
+      productId,
+      suggestedQuantity: quantity,
+      unitPrice:        Number(catalog.price ?? 0),
+      currency:         'EGP',
+      urgencyLevel:     rec.riskLevel === 'HIGH' ? 'critical' : rec.riskLevel === 'MEDIUM' ? 'high' : 'medium',
+      recommendationId: rec.id,
+      status:           'pending_review',
+      expiresAt:        new Date(Date.now() + 48 * 60 * 60 * 1000),
+    });
+    await this.draftRepo.save(draft);
+
+    await this.approvals.markExecuted(approval.tenantId, approval.id, {
+      draftId:          draft.id,
+      supplierTenantId: catalog.supplierTenantId,
+      quantity:         draft.suggestedQuantity,
+      unitPrice:        draft.unitPrice,
+    });
+    this.logger.log(`REORDER approved for product ${productId} → draft ${draft.id}`);
+  }
+
+  private async executeP2pListing(approval: Approval, rec: AiRecommendation): Promise<void> {
+    const inventoryItemId = rec.payload?.inventoryItemId as string | undefined;
+    const productId = rec.productId ?? (rec.payload?.productId as string | undefined);
+    if (!inventoryItemId || !productId) throw new Error('Missing inventoryItemId or productId in payload');
+
+    const listingRepo = this.dataSource.getRepository('p2p_listings');
+
+    // Check if already listed
+    const existing = await listingRepo.findOne({ where: { inventoryItemId, status: 'active' } }) as any;
+    if (existing) {
+      await this.approvals.markExecuted(approval.tenantId, approval.id, {
+        listingId: existing.id,
+        note:      'already_listed',
+      });
+      return;
+    }
+
+    const discountPct  = Number(rec.payload?.suggestedDiscountPct ?? 10);
+    const item = await this.itemRepo.findOne({ where: { id: inventoryItemId } });
+    const costPrice    = Number(item?.costPrice ?? 0);
+    const listingPrice = costPrice > 0
+      ? parseFloat((costPrice * (1 - discountPct / 100)).toFixed(2))
+      : 0;
+
+    const listing = listingRepo.create({
+      sellerTenantId:     approval.tenantId,
+      inventoryItemId,
+      productId,
+      price:              listingPrice,
+      quantity:           Number(rec.payload?.quantity ?? item?.quantity ?? 1),
+      minOrderQty:        1,
+      expiryDate:         rec.payload?.expiryDate ? new Date(rec.payload.expiryDate as string) : null,
+      listingType:        'clearance',
+      offerType:          discountPct > 0 ? 'discount' : 'none',
+      discountPct:        discountPct > 0 ? discountPct : null,
+      autoUpdateDiscount: true,
+      status:             'active',
+    });
+    const saved = await listingRepo.save(listing) as any;
+
+    await this.approvals.markExecuted(approval.tenantId, approval.id, {
+      listingId: saved.id,
+      price:     listingPrice,
+      discountPct,
+    });
+    this.logger.log(`P2P listing created for item ${inventoryItemId} → listing ${saved.id}`);
+  }
+
+  private async executeQuarantine(approval: Approval, rec: AiRecommendation): Promise<void> {
+    const inventoryItemId = rec.payload?.inventoryItemId as string | undefined;
+    if (!inventoryItemId) throw new Error('Missing inventoryItemId for quarantine');
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        `UPDATE inventory_items SET quantity = 0 WHERE id = $1 AND "pharmacyTenantId" = $2`,
+        [inventoryItemId, approval.tenantId],
+      );
+    });
+
+    await this.approvals.markExecuted(approval.tenantId, approval.id, {
+      quarantinedItemId: inventoryItemId,
+    });
+    this.logger.log(`Quarantine executed for item ${inventoryItemId}`);
   }
 
   // ── Manual backfill — used by the dev "sync now" endpoint and by tests ──
@@ -376,27 +635,83 @@ export class AgentBridgeService {
       catalog:         { created: 0, existed: 0 },
     };
 
-    // Recommendations
-    const recs = await this.recRepo.find({
-      where: {
-        pharmacyTenantId: tenantId,
-        type:             RecommendationType.REORDER,
-        isDismissed:      false,
-      },
-      relations: ['product'],
-      take: 200,
-    });
-    for (const rec of recs) {
-      const before = await this.approvalRepo.count({
+    // Run the rules engine (no GPT). Returns the full current set of active
+    // recommendations using upsert — IDs are stable across repeated syncs so
+    // the approval dedup check below never races with async event handlers.
+    let currentRecs: AiRecommendation[] = [];
+    try {
+      currentRecs = await this.aiService.runRulesEngineOnly(tenantId);
+    } catch (err) {
+      this.logger.warn(`runRulesEngineOnly failed for tenant ${tenantId}: ${(err as Error).message}`);
+    }
+
+    const handledTypes = new Set([
+      RecommendationType.REORDER,
+      RecommendationType.DEAD_STOCK_ALERT,
+      RecommendationType.P2P_LISTING_SUGGESTION,
+      RecommendationType.EXPIRED_QUARANTINE,
+      RecommendationType.SMART_PROCUREMENT,
+    ]);
+
+    // Use recs returned by the engine directly — no re-query, no async race.
+    const activeRecIds = new Set(currentRecs.map(r => r.id));
+    for (const rec of currentRecs) {
+      if (!handledTypes.has(rec.type as any)) continue;
+
+      // Only block on ACTIVE approvals (pending/modified/approved).
+      // Executed, rejected, or expired approvals allow re-approval so the
+      // user can retry after a failed execution (e.g. no supplier found) or
+      // reconsider a rejected recommendation. For executed approvals we also
+      // check whether execution actually succeeded — if it did (draft created,
+      // listing created, etc.) we treat the work as done and skip.
+      const lastApproval = await this.approvalRepo.findOne({
         where: { tenantId, subjectType: 'recommendation', subjectId: rec.id },
+        order: { createdAt: 'DESC' },
       });
-      if (before > 0) { result.recommendations.existed++; continue; }
+      if (lastApproval) {
+        const { status } = lastApproval;
+        if (status === 'pending' || status === 'modified' || status === 'approved') {
+          result.recommendations.existed++;
+          continue;
+        }
+        if (status === 'executed' && this.wasSuccessfulExecution(rec, lastApproval)) {
+          result.recommendations.existed++;
+          continue;
+        }
+        // rejected / expired / executed-with-failure → fall through and create new approval
+      }
       try {
-        await this.ensureApprovalForRecommendation(rec);
+        if (rec.type === RecommendationType.REORDER) {
+          await this.ensureApprovalForRecommendation(rec);
+        } else if (rec.type === RecommendationType.SMART_PROCUREMENT) {
+          await this.ensureSmartProcurementApproval(rec);
+        } else {
+          await this.ensureRiskApprovalForRecommendation(rec);
+        }
         result.recommendations.created++;
       } catch (err) {
         this.logger.warn(`backfill rec ${rec.id} failed: ${(err as Error).message}`);
       }
+    }
+
+    // Expire pending approvals whose rec was dismissed (no longer triggered).
+    // Without this, every sync accumulates stale "pending" cards in AI Center.
+    try {
+      const stalePending = await this.approvalRepo
+        .createQueryBuilder('a')
+        .where('a.tenantId = :tenantId', { tenantId })
+        .andWhere('a.subjectType = :t', { t: 'recommendation' })
+        .andWhere('a.status IN (:...statuses)', { statuses: ['pending', 'modified'] })
+        .getMany();
+      const toExpire = stalePending.filter(a => !activeRecIds.has(a.subjectId));
+      for (const stale of toExpire) {
+        await this.approvalRepo.update(stale.id, { status: 'expired' as any });
+      }
+      if (toExpire.length) {
+        this.logger.log(`Sync: expired ${toExpire.length} stale recommendation approval(s)`);
+      }
+    } catch (err) {
+      this.logger.warn(`expire stale approvals failed: ${(err as Error).message}`);
     }
 
     // Drafts + catalog: re-use the cron scanners. They're tenant-agnostic but
@@ -422,6 +737,35 @@ export class AgentBridgeService {
     result.catalog.existed = beforeLink;
 
     return result;
+  }
+
+  /**
+   * Returns true when a previous 'executed' approval for this recommendation
+   * represents a SUCCESSFUL execution that makes re-approval unnecessary.
+   *
+   * Failure cases (no supplier, listing already existed, etc.) return false
+   * so the user gets a fresh approval card after the condition is fixed.
+   */
+  private wasSuccessfulExecution(rec: AiRecommendation, approval: Approval): boolean {
+    const r = approval.executionResult ?? {};
+    switch (rec.type as string) {
+      case RecommendationType.REORDER:
+        // Draft was created → procurement in flight
+        return !!r.draftId;
+      case RecommendationType.P2P_LISTING_SUGGESTION:
+      case RecommendationType.DEAD_STOCK_ALERT:
+        // P2P listing was newly created (not 'already_listed')
+        return !!r.listingId && r.note !== 'already_listed';
+      case RecommendationType.EXPIRED_QUARANTINE:
+        // Item was quarantined
+        return !!r.quarantinedItemId;
+      case RecommendationType.SMART_PROCUREMENT:
+        // We can't know if the user actually bought — always allow re-approval
+        return false;
+      default:
+        // Advisory acknowledgement — acknowledged once is enough
+        return r.note === 'acknowledged';
+    }
   }
 }
 

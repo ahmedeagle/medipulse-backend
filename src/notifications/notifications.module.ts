@@ -7,9 +7,10 @@ import { NotificationEventListener } from './notification-event.listener';
 import { Notification } from './entities/notification.entity';
 import { User } from '../auth/entities/user.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
+import { SellerProfile } from '../p2p-seller/entities/seller-profile.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Notification, User, Tenant])],
+  imports: [TypeOrmModule.forFeature([Notification, User, Tenant, SellerProfile])],
   controllers: [NotificationController],
   providers: [NotificationService, NotificationEmailService, NotificationEventListener],
   exports: [NotificationService, NotificationEmailService],

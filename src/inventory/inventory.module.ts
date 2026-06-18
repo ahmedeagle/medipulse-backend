@@ -13,6 +13,8 @@ import { ProductRecallController } from './product-recall.controller';
 import { CatalogMatchingService } from './catalog-matching.service';
 import { ImportBatchService } from './import-batch.service';
 import { CatalogApprovalExecutor } from './catalog-approval.executor';
+import { ExpiredInventoryCron } from './expired-inventory.cron';
+import { LowStockCron } from './low-stock.cron';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
 import { ConsumptionSnapshot } from './entities/consumption-snapshot.entity';
@@ -23,6 +25,7 @@ import { ImportBatch } from './entities/import-batch.entity';
 import { ImportBatchRow } from './entities/import-batch-row.entity';
 import { NormalizationModule } from '../normalization/normalization.module';
 import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { MATCH_QUEUE } from './match.constants';
 
 @Module({
@@ -35,9 +38,10 @@ import { MATCH_QUEUE } from './match.constants';
     BullModule.registerQueue({ name: MATCH_QUEUE }),
     NormalizationModule,
     forwardRef(() => AiGovernanceModule),
+    NotificationsModule,
   ],
   controllers: [InventoryController, ProductRecallController],
-  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor],
+  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron],
   exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, TypeOrmModule],
 })
 export class InventoryModule {}

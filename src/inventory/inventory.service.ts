@@ -13,6 +13,7 @@ import { CreateInventoryItemDto } from './dto/create-inventory-item.dto';
 import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
+import { NotificationService } from '../notifications/notification.service';
 import {
   normalizePagination,
   PaginatedResult,
@@ -27,18 +28,30 @@ export class InventoryService {
     @InjectRepository(Product)
     private productRepository: Repository<Product>,
     private readonly eventEmitter: EventEmitter2,
+    private readonly notificationService: NotificationService,
   ) {}
 
   async findAll(
     tenantId: string,
     pagination: PaginationQueryDto = {},
+    q?: string,
   ): Promise<PaginatedResult<InventoryItem>> {
     const { limit, offset } = normalizePagination(pagination);
-    const [data, total] = await this.inventoryItemRepository
+    const qb = this.inventoryItemRepository
       .createQueryBuilder('item')
       .leftJoinAndSelect('item.product', 'product')
       .where('item.pharmacyTenantId = :tenantId', { tenantId })
-      .andWhere('item.deletedAt IS NULL')
+      .andWhere('item.deletedAt IS NULL');
+
+    if (q?.trim()) {
+      const like = `%${q.toLowerCase().trim()}%`;
+      qb.andWhere(
+        '(LOWER(product.name) LIKE :like OR LOWER(product."nameAr") LIKE :like OR product.barcode LIKE :like OR product.sku LIKE :like OR item."batchNumber" LIKE :like)',
+        { like },
+      );
+    }
+
+    const [data, total] = await qb
       .orderBy('product.name', 'ASC')
       .take(limit)
       .skip(offset)
@@ -62,6 +75,51 @@ export class InventoryService {
       .skip(offset)
       .getManyAndCount();
     return { data, total, limit, offset };
+  }
+
+  async findExpired(
+    tenantId: string,
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<InventoryItem>> {
+    const { limit, offset } = normalizePagination(pagination);
+    const today = new Date().toISOString().slice(0, 10);
+    const [data, total] = await this.inventoryItemRepository
+      .createQueryBuilder('item')
+      .leftJoinAndSelect('item.product', 'product')
+      .where('item.pharmacyTenantId = :tenantId', { tenantId })
+      .andWhere('item.deletedAt IS NULL')
+      .andWhere('item."expiryDate" IS NOT NULL')
+      .andWhere('item."expiryDate" < :today', { today })
+      .andWhere('item.quantity > 0')
+      .orderBy('item."expiryDate"', 'ASC')
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+    return { data, total, limit, offset };
+  }
+
+  // Used by ExpiredInventoryCron — returns all expired items for a tenant without pagination
+  async findExpiredForCron(tenantId: string): Promise<InventoryItem[]> {
+    const today = new Date().toISOString().slice(0, 10);
+    return this.inventoryItemRepository
+      .createQueryBuilder('item')
+      .leftJoinAndSelect('item.product', 'product')
+      .where('item.pharmacyTenantId = :tenantId', { tenantId })
+      .andWhere('item.deletedAt IS NULL')
+      .andWhere('item."expiryDate" IS NOT NULL')
+      .andWhere('item."expiryDate" < :today', { today })
+      .andWhere('item.quantity > 0')
+      .getMany();
+  }
+
+  // Used by DeadStockCron — returns all tenants with inventory
+  async findDistinctTenants(): Promise<string[]> {
+    const rows = await this.inventoryItemRepository
+      .createQueryBuilder('item')
+      .select('DISTINCT item."pharmacyTenantId"', 'tenantId')
+      .where('item.deletedAt IS NULL')
+      .getRawMany<{ tenantId: string }>();
+    return rows.map((r) => r.tenantId);
   }
 
   /**
@@ -124,10 +182,81 @@ export class InventoryService {
 
     const saved = await this.inventoryItemRepository.save(item);
 
-    return this.inventoryItemRepository.findOne({
+    const result = await this.inventoryItemRepository.findOne({
       where: { id: saved.id },
       relations: ['product'],
     });
+
+    // Fire immediate alerts — don't wait for cron
+    const productNameAr = (product as any).nameAr ?? product.name ?? 'منتج';
+    const todayKey = new Date().toISOString().slice(0, 10);
+
+    // Low stock: quantity already at or below threshold on creation
+    const threshold = dto.minThreshold ?? 0;
+    if (threshold > 0 && (dto.quantity ?? 0) <= threshold) {
+      const alreadySent = await this.notificationService.findTodayLowStockAlert(
+        tenantId, dto.productId, todayKey,
+      );
+      if (!alreadySent) {
+        await this.notificationService.create({
+          tenantId,
+          type: 'low_stock',
+          title: `⚠️ مخزون منخفض: ${productNameAr}`,
+          body: `الكمية المضافة ${dto.quantity ?? 0} وحدة — أقل من الحد الأدنى (${threshold} وحدة)`,
+          resourceRef: `/pharmacy/inventory?productId=${dto.productId}`,
+        });
+      }
+      // Emit domain event — LowStockCron listener creates an AI Center task immediately
+      this.eventEmitter.emit(EVENTS.INVENTORY_LOW_STOCK_DETECTED, {
+        tenantId,
+        inventoryItemId: saved.id,
+        productId:       dto.productId,
+        productNameAr,
+        quantity:        dto.quantity ?? 0,
+        minThreshold:    threshold,
+      });
+    }
+
+    // Near expiry: expiry date within 90 days (conservative default — settings read by cron later)
+    if (dto.expiryDate) {
+      const expiryDate = new Date(dto.expiryDate);
+      const daysToExpiry = Math.ceil(
+        (expiryDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
+      );
+      if (daysToExpiry > 0 && daysToExpiry <= 90) {
+        // Emit event — ExpiryLiquidationCron listener creates an AI Center task immediately
+        this.eventEmitter.emit(EVENTS.INVENTORY_NEAR_EXPIRY_DETECTED, {
+          tenantId,
+          inventoryItemId: saved.id,
+          productId:       dto.productId,
+          productNameAr,
+          quantity:        dto.quantity ?? 0,
+          sellingPrice:    null,
+          costPrice:       null,
+          expiryDate:      expiryDate.toISOString(),
+          daysToExpiry,
+        });
+      } else if (daysToExpiry <= 0) {
+        await this.notificationService.create({
+          tenantId,
+          type: 'expired_stock',
+          title: `🚨 منتج منتهي الصلاحية: ${productNameAr}`,
+          body: `هذا المنتج انتهت صلاحيته — يجب عزله فوراً (الكمية: ${dto.quantity ?? 0} وحدة)`,
+          resourceRef: `/pharmacy/inventory?productId=${dto.productId}`,
+        });
+      }
+    }
+
+    // Emit inventory event so other listeners (AI bridge, P2P cron) react
+    this.eventEmitter.emit(EVENTS.INVENTORY_UPDATED, {
+      tenantId,
+      productId: dto.productId,
+      inventoryItemId: saved.id,
+      quantity: dto.quantity ?? 0,
+      minThreshold: threshold,
+    });
+
+    return result;
   }
 
   async update(
@@ -182,6 +311,55 @@ export class InventoryService {
           'manual',
         ),
       );
+
+      // Fire low-stock notification + domain event when quantity crosses below minThreshold
+      const threshold = dto.minThreshold ?? item.minThreshold;
+      if (previousQuantity > threshold && dto.quantity <= threshold) {
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const alreadySent = await this.notificationService.findTodayLowStockAlert(
+          tenantId, item.productId, todayKey,
+        );
+        const productNameAr = (updated as any).product?.nameAr ?? (updated as any).product?.name ?? 'منتج';
+        if (!alreadySent) {
+          await this.notificationService.create({
+            tenantId,
+            type: 'low_stock',
+            title: `⚠️ مخزون منخفض: ${productNameAr}`,
+            body: `الكمية المتبقية ${dto.quantity} وحدة — أقل من الحد الأدنى (${threshold} وحدة). يُنصح بإعادة الطلب`,
+            resourceRef: `/pharmacy/inventory?productId=${item.productId}`,
+          });
+        }
+        // Emit domain event — LowStockCron listener creates an AI Center task immediately
+        this.eventEmitter.emit(EVENTS.INVENTORY_LOW_STOCK_DETECTED, {
+          tenantId,
+          inventoryItemId: id,
+          productId:       item.productId,
+          productNameAr,
+          quantity:        dto.quantity,
+          minThreshold:    threshold,
+        });
+      }
+    }
+
+    // If expiryDate was just set/changed to within 90 days, trigger AI liquidation task immediately
+    if (dto.expiryDate !== undefined) {
+      const newExpiry = new Date(dto.expiryDate);
+      const daysToExpiry = Math.ceil((newExpiry.getTime() - Date.now()) / 86_400_000);
+      if (daysToExpiry > 0 && daysToExpiry <= 90) {
+        const productNameAr = (updated as any).product?.nameAr ?? (updated as any).product?.name ?? 'منتج';
+        const currentQty = dto.quantity ?? item.quantity;
+        this.eventEmitter.emit(EVENTS.INVENTORY_NEAR_EXPIRY_DETECTED, {
+          tenantId,
+          inventoryItemId: id,
+          productId:       item.productId,
+          productNameAr,
+          quantity:        currentQty,
+          sellingPrice:    (updated as any).sellingPrice ?? null,
+          costPrice:       (updated as any).costPrice ?? null,
+          expiryDate:      newExpiry.toISOString(),
+          daysToExpiry,
+        });
+      }
     }
 
     return updated;

@@ -12,6 +12,7 @@ import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
       OrderItem,
     ]),
     forwardRef(() => AiGovernanceModule),
+    PharmacySettingsModule,
   ],
   controllers: [ProcurementController],
   providers: [ProcurementDraftService, ProcurementDraftListener, PurchaseApprovalExecutor],

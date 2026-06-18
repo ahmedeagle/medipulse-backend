@@ -32,6 +32,7 @@ import { AgentBridgeService } from './agent-bridge.service';
 import { AiAuditStatsService } from './ai-audit-stats.service';
 import { AiTokenBudget } from '../ai/governance/token-budget';
 import { AiService } from '../ai/ai.service';
+import { ExpiryLiquidationCron } from '../p2p-listing/expiry-liquidation.cron';
 import {
   BulkDecideDto,
   DecideApprovalDto,
@@ -67,7 +68,17 @@ export class AiCenterController {
     private readonly aiStats:   AiAuditStatsService,
     private readonly tokenBudget: AiTokenBudget,
     private readonly aiSvc:     AiService,
+    private readonly expiryLiquidationCron: ExpiryLiquidationCron,
   ) {}
+
+  // ── DEV ONLY: manual cron trigger (remove before prod) ──────────────────
+  @Post('debug/run-expiry-liquidation-cron')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'DEV ONLY — manually trigger expiry liquidation cron' })
+  async runExpiryLiquidationCron() {
+    await this.expiryLiquidationCron.detectNearExpiryStock();
+    return { ok: true, message: 'Expiry liquidation cron ran — check AI Center tasks tab' };
+  }
 
   // ── Workforce Dashboard ──────────────────────────────────
 

@@ -167,6 +167,17 @@ export class ApprovalService {
     return a;
   }
 
+  /** Returns the first non-terminal approval for a given (subjectType, subjectId) pair. */
+  async findPendingBySubject(
+    tenantId: string,
+    subjectType: string,
+    subjectId: string,
+  ): Promise<Approval | null> {
+    return this.repo.findOne({
+      where: { tenantId, subjectType, subjectId, status: 'pending' },
+    });
+  }
+
   async getEvents(tenantId: string, id: string): Promise<ApprovalEvent[]> {
     await this.getOne(tenantId, id); // tenant-scope guard
     return this.events.find({
@@ -261,12 +272,13 @@ export class ApprovalService {
       return a;
     }
 
+    const from = a.status;
     // Preserve original AI proposal only on the FIRST modification.
     if (!a.originalPayload) a.originalPayload = a.payload;
     a.payload = payload;
     a.status  = 'modified';
     const saved = await this.repo.save(a);
-    await this.recordEvent(saved, 'pending', 'modified', actor, note, diff);
+    await this.recordEvent(saved, from, 'modified', actor, note, diff);
     return saved;
   }
 
@@ -382,16 +394,28 @@ export class ApprovalService {
       .andWhere('"expiresAt" IS NOT NULL')
       .andWhere('"expiresAt" < now()');
     if (tenantId) qb.andWhere('"tenantId" = :tenantId', { tenantId });
-    const result = await qb.returning(['id', 'tenantId', 'agentCode']).execute();
-    const rows: Array<{ id: string; tenantId: string; agentCode: string }> =
-      result.raw ?? [];
-    for (const r of rows) {
+    // Capture pre-update statuses BEFORE the bulk UPDATE so fromStatus is accurate
+    // (RETURNING gives the post-update value, which is always 'expired').
+    const preQuery = this.repo
+      .createQueryBuilder('a')
+      .select(['a.id', 'a.tenantId', 'a.agentCode', 'a.status'])
+      .where('a.status IN (:...active)', { active: ['pending', 'modified'] })
+      .andWhere('a.expiresAt IS NOT NULL')
+      .andWhere('a.expiresAt < now()');
+    if (tenantId) preQuery.andWhere('a.tenantId = :tenantId', { tenantId });
+    const toExpire = await preQuery.getMany();
+
+    if (toExpire.length === 0) return 0;
+
+    await qb.execute();
+
+    for (const r of toExpire) {
       await this.events.save(
         this.events.create({
           approvalId: r.id,
           tenantId:   r.tenantId,
           agentCode:  r.agentCode,
-          fromStatus: 'pending',
+          fromStatus: r.status,
           toStatus:   'expired',
           actorType:  'scheduler',
           actorUserId: null,
@@ -399,7 +423,7 @@ export class ApprovalService {
         }),
       );
     }
-    return rows.length;
+    return toExpire.length;
   }
 
   // ── internals ────────────────────────────────────────────────────────────

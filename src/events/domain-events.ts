@@ -180,4 +180,21 @@ export const EVENTS = {
   RECOMMENDATION_DISMISSED:     'recommendation.dismissed',
   PRODUCT_RECALLED:             'product.recalled',
   BATCH_EXPIRY_ALERT:           'batch.expiry_alert',
+  INVENTORY_NEAR_EXPIRY_DETECTED: 'inventory.near_expiry_detected',
+  INVENTORY_LOW_STOCK_DETECTED:   'inventory.low_stock_detected',
+} as const;
+
+// ── P2P / Pharmacy Exchange Network events ────────────────────────────────────
+
+export const P2P_EVENTS = {
+  ORDER_CREATED:      'p2p.order.created',
+  ORDER_ACCEPTED:     'p2p.order.accepted',
+  ORDER_SHIPPED:      'p2p.order.shipped',
+  ORDER_REJECTED:     'p2p.order.rejected',
+  ORDER_COMPLETED:    'p2p.order.completed',
+  ORDER_CANCELLED:    'p2p.order.cancelled',
+  INVOICE_GENERATED:  'p2p.invoice.generated',
+  PROFILE_SUBMITTED:  'p2p.profile.submitted',
+  PROFILE_VERIFIED:   'p2p.profile.verified',
+  PROFILE_REJECTED:   'p2p.profile.rejected',
 } as const;

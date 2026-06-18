@@ -3,7 +3,10 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { passportJwtSecret } from 'jwks-rsa';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Role } from '../../common/enums/role.enum';
+import { User } from '../entities/user.entity';
 
 /**
  * Keycloak JWT payload shape.
@@ -32,7 +35,10 @@ export interface KcTokenPayload {
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @InjectRepository(User) private readonly userRepo: Repository<User>,
+  ) {
     const kcUrl   = config.get<string>('KC_URL');
     const kcRealm = config.get<string>('KC_REALM');
 
@@ -70,16 +76,19 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     // All roles except system-admin require a tenantId.
-    // In development (NODE_ENV !== production), we warn but don't block —
-    // allows testing before KC user attributes are fully configured.
-    // In production this MUST be set on every non-admin user.
-    if (!payload.tenantId && role !== Role.SYSTEM_ADMIN) {
+    let tenantId: string | null = payload.tenantId ?? null;
+
+    if (!tenantId && role !== Role.SYSTEM_ADMIN) {
       const isProd = this.config.get<string>('NODE_ENV') === 'production';
       if (isProd) {
         throw new UnauthorizedException('tenantId missing from Keycloak token — check protocol mapper');
       }
-      // Development: log warning, allow through with null tenantId
-      // Set the KC user attribute tenantId to fix this properly
+      // Dev fallback: look up tenantId from DB using the KC user ID (sub).
+      // This handles the case where the Keycloak protocol mapper isn't configured yet.
+      const dbUser = await this.userRepo.findOne({ where: { kcId: payload.sub }, select: ['tenantId'] });
+      if (dbUser?.tenantId) {
+        tenantId = dbUser.tenantId;
+      }
     }
 
     // chain-admin requires organizationId (always enforced)
@@ -93,7 +102,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       firstName:      payload.given_name  ?? '',
       lastName:       payload.family_name ?? '',
       role,
-      tenantId:       payload.tenantId       ?? null,
+      tenantId,
       organizationId: payload.organizationId ?? null,
     };
   }

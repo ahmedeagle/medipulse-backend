@@ -19,7 +19,36 @@ export type NotificationType =
   | 'inventory_batch_failed'
   | 'morning_briefing'
   | 'ai_governance_blocked'
-  | 'system';
+  | 'system'
+  // ── PEN (Pharmacy Exchange Network) ───────────────────────────────────────
+  | 'p2p_order_received'
+  | 'p2p_order_accepted'
+  | 'p2p_order_rejected'
+  | 'p2p_order_completed'
+  | 'p2p_order_cancelled'
+  | 'p2p_order_shipped'
+  | 'p2p_invoice_ready'
+  | 'p2p_profile_submitted'
+  | 'p2p_profile_verified'
+  | 'p2p_profile_rejected'
+  | 'p2p_smart_procurement_opportunity'
+  // ── Expiry ────────────────────────────────────────────────────────────────
+  | 'near_expiry'        // single item urgency crossing a threshold
+  | 'expiry_digest'      // daily summary of all expiring items
+  | 'expired_stock'      // items that are already past expiry date — must be removed
+  // ── Inventory Health ──────────────────────────────────────────────────────
+  | 'low_stock'          // item dropped below minThreshold
+  | 'dead_stock'         // weekly dead-stock digest (high urgency items)
+  // ── Feature Requests ─────────────────────────────────────────────────────
+  | 'feature_request_update'   // chat feature request status changed (in_progress / resolved)
+  // ── P2P AI Monitor ────────────────────────────────────────────────────────
+  | 'p2p_order_action_required' // AI detected a stale/stuck order needing attention
+  | 'p2p_order_reminder'        // nudge sent to seller to ship/respond
+  // ── POS Integrity ─────────────────────────────────────────────────────────
+  | 'pos_integrity_alert'         // cash mismatch or high refund rate flagged
+  | 'pos_integrity_resolved'      // manager reviewed and acknowledged
+  // ── Expiry Liquidation ────────────────────────────────────────────────────
+  | 'clearance_listing_available'; // buyer notification: a clearance deal is live for a product they need
 
 /**
  * In-app notification per user.

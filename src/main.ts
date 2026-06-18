@@ -7,6 +7,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import helmet from 'helmet';
 import * as express from 'express';
+import * as path from 'path';
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter as BullBoardExpressAdapter } from '@bull-board/express';
@@ -30,10 +31,13 @@ async function bootstrap() {
   // ── CORS ───────────────────────────────────────────────────────────────────
   app.enableCors({
     origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   });
+
+  // ── Static files — uploaded seller documents ──────────────────────────────
+  app.useStaticAssets(path.join(process.cwd(), 'uploads'), { prefix: '/uploads' });
 
   // ── Body size limit ────────────────────────────────────────────────────────
   app.use(express.json({ limit: '1mb' }));

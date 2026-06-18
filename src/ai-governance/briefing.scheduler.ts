@@ -8,6 +8,7 @@ import { User } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
 import { NotificationService } from '../notifications/notification.service';
 import { DashboardService } from './dashboard.service';
+import { CronLockService } from '../common/cron-lock/cron-lock.service';
 
 /**
  * Morning Briefing (PRD v2 §14).
@@ -26,10 +27,17 @@ export class BriefingScheduler {
     @InjectRepository(User)   private readonly users:   Repository<User>,
     private readonly dashboard:     DashboardService,
     private readonly notifications: NotificationService,
+    private readonly cronLock:      CronLockService,
   ) {}
 
   @Cron('0 7 * * 1-6', { name: 'ai-morning-briefing' })
   async runDaily(): Promise<void> {
+    const acquired = await this.cronLock.acquire('morning_briefing_daily');
+    if (!acquired) {
+      this.logger.log('BriefingScheduler: skipped (another pod holds the lock)');
+      return;
+    }
+
     const active = await this.tenants.find({ where: { isActive: true } });
     this.logger.log(`Morning briefing sweep: ${active.length} tenants`);
     for (const tenant of active) {
@@ -55,7 +63,15 @@ export class BriefingScheduler {
 
     const { title, body } = formatBriefingAr(summary);
 
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+
     for (const u of recipients) {
+      const alreadySent = await this.notifications.findRecentByTypeForUser(
+        tenantId, u.id, 'morning_briefing', todayStart,
+      );
+      if (alreadySent) continue;
+
       await this.notifications.create({
         tenantId,
         userId:      u.id,

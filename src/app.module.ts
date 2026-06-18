@@ -29,6 +29,15 @@ import { WorkflowModule } from './workflow/workflow.module';
 import { FinancialModule } from './financial/financial.module';
 import { SecurityModule } from './security/security.module';
 import { CatalogRequestsModule } from './catalog-requests/catalog-requests.module';
+import { P2pSellerModule } from './p2p-seller/p2p-seller.module';
+import { P2pListingModule } from './p2p-listing/p2p-listing.module';
+import { P2pOrdersModule } from './p2p-orders/p2p-orders.module';
+import { P2pMarketplaceModule } from './p2p-marketplace/p2p-marketplace.module';
+import { PharmacySettingsModule } from './pharmacy-settings/pharmacy-settings.module';
+import { ChatModule }             from './chat/chat.module';
+import { PosModule }              from './pos/pos.module';
+import { FraudModule }            from './fraud/fraud.module';
+import { FeatureRequestsModule }  from './feature-requests/feature-requests.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 
 @Module({
@@ -121,6 +130,19 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     FinancialModule,
     SecurityModule,
     CatalogRequestsModule,
+    // ── Pharmacy Exchange Network (PEN) ───────────────────────────────────────
+    P2pSellerModule,
+    P2pListingModule,
+    P2pOrdersModule,
+    P2pMarketplaceModule,
+    // ── Pharmacy Settings ─────────────────────────────────────────────────────
+    PharmacySettingsModule,
+    // ── AI Chat & Fraud Detection ─────────────────────────────────────────────
+    ChatModule,
+    FraudModule,
+    FeatureRequestsModule,
+    // ── Point of Sale ─────────────────────────────────────────────────────────
+    PosModule,
   ],
 
   providers: [

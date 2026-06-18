@@ -57,6 +57,70 @@ export class NotificationService {
       .execute();
   }
 
+  async findByResourceRef(resourceRef: string, tenantId: string): Promise<Notification | null> {
+    return this.repo.findOne({ where: { resourceRef, tenantId } });
+  }
+
+  async findTodayDigest(tenantId: string, todayStart: Date): Promise<Notification | null> {
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.type = :type', { type: 'expiry_digest' })
+      .andWhere('n.createdAt >= :start', { start: todayStart })
+      .getOne();
+  }
+
+  async findTodayExpiredDigest(tenantId: string, todayKey: string): Promise<Notification | null> {
+    const start = new Date(`${todayKey}T00:00:00.000Z`);
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.type = :type', { type: 'expired_stock' })
+      .andWhere('n.createdAt >= :start', { start })
+      .getOne();
+  }
+
+  async findTodayLowStockAlert(tenantId: string, productId: string, todayKey: string): Promise<Notification | null> {
+    const start = new Date(`${todayKey}T00:00:00.000Z`);
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.type = :type', { type: 'low_stock' })
+      .andWhere("n.resourceRef LIKE :ref", { ref: `%productId=${productId}%` })
+      .andWhere('n.createdAt >= :start', { start })
+      .getOne();
+  }
+
+  async findRecentDeadStockAlert(tenantId: string, since: Date): Promise<Notification | null> {
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.type = :type', { type: 'dead_stock' })
+      .andWhere('n.createdAt >= :since', { since })
+      .getOne();
+  }
+
+  /** Generic dedup: was a notification of this type sent to the tenant since `since`? */
+  async findRecentByType(tenantId: string, type: NotificationType, since: Date): Promise<Notification | null> {
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.type = :type', { type })
+      .andWhere('n.createdAt >= :since', { since })
+      .getOne();
+  }
+
+  /** Generic dedup scoped to a specific user (used for per-user notifications like morning briefing). */
+  async findRecentByTypeForUser(tenantId: string, userId: string, type: NotificationType, since: Date): Promise<Notification | null> {
+    return this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('n.userId = :userId', { userId })
+      .andWhere('n.type = :type', { type })
+      .andWhere('n.createdAt >= :since', { since })
+      .getOne();
+  }
+
   async markAllRead(tenantId: string, userId: string): Promise<void> {
     await this.repo
       .createQueryBuilder()

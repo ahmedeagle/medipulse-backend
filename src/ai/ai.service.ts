@@ -8,7 +8,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -24,7 +24,7 @@ import { SupplierReliabilityService } from '../supplier/supplier-reliability.ser
 import { ConsumptionAnalyticsService } from '../inventory/consumption-analytics.service';
 import { DemandForecastingService } from '../forecasting/demand-forecasting.service';
 import { EoqService } from '../forecasting/eoq.service';
-import { RulesEngine, RawRecommendation } from './rules.engine';
+import { RulesEngine, RawRecommendation, P2pListingSlim } from './rules.engine';
 import { RecommendationType } from '../common/enums/recommendation-type.enum';
 import { Order } from '../orders/entities/order.entity';
 
@@ -112,6 +112,7 @@ export class AiService {
     private readonly dynamicAgent: DynamicAgentRunner,
     @InjectQueue(AI_RECOMMENDATIONS_QUEUE)
     private readonly queue: Queue,
+    private readonly dataSource: DataSource,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     if (!apiKey) {
@@ -423,6 +424,187 @@ export class AiService {
       audit.latencyMs = Date.now() - startMs;
       await this.auditLogRepo.save(audit);
       throw error;
+    }
+  }
+
+  // ─── Rules-engine-only run (no GPT, used by sync-now / manual trigger) ──────
+
+  /**
+   * Runs the rules engine immediately without calling OpenAI.
+   * Used by the "sync now" button so the user gets instant feedback even
+   * when the BullMQ worker is not running or OpenAI is unreachable.
+   *
+   * Uses Arabic template explanations instead of GPT-generated ones.
+   * Emits RECOMMENDATION_GENERATED for every saved recommendation so
+   * AgentBridgeService can convert them into AI Center approval tasks.
+   */
+  async runRulesEngineOnly(pharmacyTenantId: string): Promise<AiRecommendation[]> {
+    const inventoryItems = await this.inventoryService.findAllForTenant(pharmacyTenantId);
+    if (!inventoryItems.length) return [];
+
+    const pharmacyProductIds = inventoryItems.map((i) => i.productId).filter(Boolean) as string[];
+
+    const [allCatalog, p2pListings, consumptionData] = await Promise.all([
+      this.supplierService.findCatalogForPharmacy(pharmacyProductIds),
+      // Fetch active P2P listings from OTHER pharmacies for the same products.
+      // Excluded: this pharmacy's own listings (sellerTenantId != pharmacyTenantId).
+      pharmacyProductIds.length
+        ? this.dataSource.query<P2pListingSlim[]>(
+            `SELECT id, "sellerTenantId", "productId",
+                    price::float, quantity, "minOrderQty",
+                    "expiryDate", "listingType", "discountPct"::float
+             FROM p2p_listings
+             WHERE "productId" = ANY($1)
+               AND status = 'active'
+               AND quantity > 0
+               AND "sellerTenantId" != $2`,
+            [pharmacyProductIds, pharmacyTenantId],
+          )
+        : Promise.resolve([]),
+      // Fetch consumption snapshots so dead-stock detection (Rule 4) fires.
+      Promise.all(
+        inventoryItems.map((item) =>
+          this.consumptionAnalyticsService
+            .getSnapshots(pharmacyTenantId, item.productId, 8)
+            .then((s) => [item.productId, s] as [string, any[]]),
+        ),
+      ).then((pairs) => new Map(pairs)),
+    ]);
+
+    const rawRecs = this.rulesEngine.generateRecommendations(
+      inventoryItems, allCatalog, [], { p2pListings, consumptionData },
+    );
+
+    // The rules engine skips REORDER when order history < 28 days (no sales data).
+    // Inject threshold-only REORDER recs for any item the rules engine missed.
+    const reorderedProductIds = new Set(
+      rawRecs.filter(r => r.type === RecommendationType.REORDER).map(r => r.productId),
+    );
+    for (const item of inventoryItems) {
+      if (!item.productId) continue;
+      if (reorderedProductIds.has(item.productId)) continue;
+      const threshold = Number(item.minThreshold ?? 0);
+      if (threshold <= 0) continue;
+      const qty = Number(item.quantity ?? 0);
+      if (qty > threshold) continue;
+      const productNameAr = (item.product as any)?.nameAr ?? (item.product as any)?.name ?? 'منتج';
+      rawRecs.push({
+        type:      RecommendationType.REORDER,
+        productId: item.productId,
+        riskLevel: qty === 0 ? 'HIGH' : 'MEDIUM',
+        payload: {
+          productNameAr,
+          currentQuantity: qty,
+          minThreshold:    threshold,
+          deficit:         threshold - qty,
+          note:            'insufficient_history — threshold-only assessment',
+        },
+      } as RawRecommendation);
+    }
+
+    // Load all currently active recs so we can upsert (stable IDs) instead of
+    // delete+recreate. Stable IDs mean existing approvals remain valid and the
+    // dedup check in backfillTenant never races.
+    const existingRecs = await this.recommendationRepo.find({
+      where: { pharmacyTenantId, isDismissed: false },
+      relations: ['product'],
+    });
+    const existingByKey = new Map(existingRecs.map(r => [`${r.productId}|${r.type}`, r]));
+
+    if (!rawRecs.length) {
+      // Nothing triggered — dismiss all active recs
+      if (existingRecs.length) {
+        await this.recommendationRepo
+          .createQueryBuilder()
+          .update()
+          .set({ isDismissed: true })
+          .where('pharmacyTenantId = :pid', { pid: pharmacyTenantId })
+          .andWhere('isDismissed = false')
+          .execute();
+      }
+      return [];
+    }
+
+    // Dismiss recs whose (productId, type) is no longer triggered
+    const currentKeys = new Set(rawRecs.map(r => `${r.productId}|${r.type}`));
+    const toStale = existingRecs.filter(r => !currentKeys.has(`${r.productId}|${r.type}`));
+    if (toStale.length) {
+      await this.recommendationRepo
+        .createQueryBuilder()
+        .update()
+        .set({ isDismissed: true })
+        .whereInIds(toStale.map(r => r.id))
+        .execute();
+    }
+
+    const saved: AiRecommendation[] = [];
+
+    for (const raw of rawRecs) {
+      const key      = `${raw.productId}|${raw.type}`;
+      const existing = existingByKey.get(key);
+
+      if (existing) {
+        // Update in-place — stable ID keeps existing approvals valid
+        await this.recommendationRepo.update(existing.id, {
+          payload:     raw.payload,
+          explanation: this.templateExplanation(raw),
+          riskLevel:   raw.riskLevel,
+          isDismissed: false,
+        });
+        const refreshed = await this.recommendationRepo.findOne({
+          where: { id: existing.id },
+          relations: ['product'],
+        });
+        saved.push(refreshed);
+      } else {
+        const entity = this.recommendationRepo.create({
+          pharmacyTenantId,
+          type:               raw.type,
+          productId:          raw.productId,
+          payload:            raw.payload,
+          explanation:        this.templateExplanation(raw),
+          explanationFromGpt: false,
+          riskLevel:          raw.riskLevel,
+          confidence:         raw.riskLevel === 'HIGH' ? 0.85 : raw.riskLevel === 'MEDIUM' ? 0.70 : 0.55,
+          confidenceLabel:    raw.riskLevel === 'HIGH' ? 'high' : 'medium',
+          rulesTriggered:     [raw.type],
+          isDismissed:        false,
+          modelVersion:       null,
+          promptVersion:      null,
+        });
+        const result = await this.recommendationRepo.save(entity);
+        const withRel = await this.recommendationRepo.findOne({
+          where: { id: result.id },
+          relations: ['product'],
+        });
+        saved.push(withRel);
+      }
+    }
+
+    // No event emission here — backfillTenant drives approval creation
+    // synchronously to eliminate the async-event race that caused duplicates.
+    return saved;
+  }
+
+  private templateExplanation(raw: RawRecommendation): string {
+    const n = raw.payload?.productNameAr ?? raw.payload?.productName ?? 'المنتج';
+    const days = raw.payload?.daysLeft ?? raw.payload?.daysPastExpiry ?? '?';
+    const qty = raw.payload?.quantity ?? raw.payload?.currentQuantity ?? '?';
+    switch (raw.type) {
+      case RecommendationType.REORDER:
+        return `المخزون وصل للحد الأدنى (${qty} وحدة متبقية) — يُنصح بإعادة طلب ${n} ${raw.riskLevel === 'HIGH' ? 'بشكل عاجل' : 'قريباً'}`;
+      case RecommendationType.P2P_LISTING_SUGGESTION:
+        return `تبقى ${days} يوم على انتهاء صلاحية ${n} — اعرضه في البورصة الدوائية قبل انتهاء صلاحيته`;
+      case RecommendationType.DEAD_STOCK_ALERT:
+        return `${n} لم يُباع منذ فترة طويلة (${qty} وحدة راكدة) — راجع السعر أو اعرضه للبيع`;
+      case RecommendationType.EXPIRED_QUARANTINE:
+        return `${n} انتهت صلاحيته — يجب عزل ${qty} وحدة فوراً وإزالتها من المخزون النشط`;
+      case RecommendationType.FORECAST_ALERT:
+        return `توقعات الطلب تشير لارتفاع في استهلاك ${n} خلال الأسبوعين القادمين`;
+      case RecommendationType.CONSUMPTION_SPIKE:
+        return `ارتفاع مفاجئ في معدل استهلاك ${n} — راجع مستوى المخزون`;
+      default:
+        return `توصية تلقائية للمنتج ${n} (${raw.type})`;
     }
   }
 

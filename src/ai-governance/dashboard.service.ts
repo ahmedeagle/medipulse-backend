@@ -19,6 +19,7 @@ export interface DashboardWidget {
 export interface WorkforceSummary {
   generatedAt: string;
   widgets: DashboardWidget[];
+  expiryRiskEgp: number;
   pendingApprovals: {
     total: number;
     critical: number;
@@ -63,12 +64,12 @@ export class DashboardService {
 
   async summary(tenantId: string): Promise<WorkforceSummary> {
     const now = new Date();
-    const in30d  = new Date(now.getTime() + 30 * DAY_MS);
-    const in60d  = new Date(now.getTime() + 60 * DAY_MS);
-    const dead60 = new Date(now.getTime() - 60 * DAY_MS);
+    const in60d   = new Date(now.getTime() + 60 * DAY_MS);
+    const in180d  = new Date(now.getTime() + 180 * DAY_MS);
+    const dead60  = new Date(now.getTime() - 60 * DAY_MS);
 
     // Inventory KPIs ------------------------------------------------------
-    const [stockRisk, outOfStock, nearExpiry, expired, deadStock, catalogIssues] =
+    const [stockRisk, outOfStock, nearExpiry, expired, deadStock, catalogIssues, expiryRiskRaw] =
       await Promise.all([
         this.inventory.createQueryBuilder('i')
           .where('i.pharmacyTenantId = :t', { t: tenantId })
@@ -105,6 +106,16 @@ export class DashboardService {
           .andWhere('i.deletedAt IS NULL')
           .andWhere(`i.linkStatus IN ('suggested', 'unlinked')`)
           .getCount(),
+        // Financial value of stock expiring in next 180 days
+        this.inventory.createQueryBuilder('i')
+          .select('COALESCE(SUM(i.quantity * COALESCE(i.costPrice, i.sellingPrice, 0)), 0)::float', 'total')
+          .where('i.pharmacyTenantId = :t', { t: tenantId })
+          .andWhere('i.deletedAt IS NULL')
+          .andWhere('i.expiryDate IS NOT NULL')
+          .andWhere('i.expiryDate >= :n', { n: now })
+          .andWhere('i.expiryDate <= :f180', { f180: in180d })
+          .andWhere('i.quantity > 0')
+          .getRawOne<{ total: number }>(),
       ]);
 
     // Approval queue ------------------------------------------------------
@@ -175,7 +186,7 @@ export class DashboardService {
         count: nearExpiry,
         severity: nearExpiry > 0 ? 'warning' : 'info',
         iconKey: 'clock',
-        deepLink: '/pharmacy/inventory',
+        deepLink: '/pharmacy/ai-center?tab=tasks&task=expiry_clearance',
         emptyMessageAr: 'لا توجد دفعات قريبة الانتهاء',
       },
       {
@@ -216,9 +227,12 @@ export class DashboardService {
       },
     ];
 
+    const expiryRiskEgp = Math.round(Number(expiryRiskRaw?.total ?? 0));
+
     return {
       generatedAt: now.toISOString(),
       widgets,
+      expiryRiskEgp,
       pendingApprovals: {
         total: pendingTotal,
         critical: priorityCount.critical ?? 0,

@@ -11,8 +11,13 @@ import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.
 import { SupplierReliabilityScore } from '../supplier/entities/supplier-reliability-score.entity';
 import { PreferredSupplier } from '../supplier/entities/preferred-supplier.entity';
 import { DeadStockService } from '../inventory/dead-stock.service';
+import { DeadStockCron } from './dead-stock.cron';
 import { PriceSnapshot } from '../analytics/entities/price-snapshot.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
+import { CronLockModule } from '../common/cron-lock/cron-lock.module';
+import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
 
 /**
  * Imported by main HTTP app.
@@ -32,9 +37,13 @@ import { Tenant } from '../auth/entities/tenant.entity';
       PriceSnapshot,
       Tenant,
     ]),
+    NotificationsModule,
+    PharmacySettingsModule,
+    CronLockModule,
+    AiGovernanceModule,
   ],
   controllers: [ForecastingController],
-  providers: [DemandForecastingService, EoqService, DeadStockService],
+  providers: [DemandForecastingService, EoqService, DeadStockService, DeadStockCron],
   exports: [DemandForecastingService, EoqService, DeadStockService],
 })
 export class ForecastingModule {}

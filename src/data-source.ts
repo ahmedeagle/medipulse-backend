@@ -10,7 +10,10 @@ export default new DataSource({
   url:      process.env.DATABASE_URL,
   entities:   ['src/**/*.entity.ts'],
   migrations: ['src/migrations/*.ts'],
-  migrationsTableName: 'typeorm_migrations',
+  migrationsTableName:      'typeorm_migrations',
+  // 'each' wraps every migration in its own transaction and allows individual
+  // migrations to opt out (transaction = false) — required for CONCURRENTLY indexes.
+  migrationsTransactionMode: 'each',
   synchronize: false,
   logging:     false,
 });

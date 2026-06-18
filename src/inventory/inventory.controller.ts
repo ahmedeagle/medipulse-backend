@@ -73,8 +73,9 @@ export class InventoryController {
   findAll(
     @CurrentUser() user: any,
     @Query() pagination: PaginationQueryDto,
+    @Query('q') q?: string,
   ) {
-    return this.inventoryService.findAll(user.tenantId, pagination);
+    return this.inventoryService.findAll(user.tenantId, pagination, q);
   }
 
   @Get('inventory/low-stock')
@@ -86,6 +87,17 @@ export class InventoryController {
     @Query() pagination: PaginationQueryDto,
   ) {
     return this.inventoryService.findLowStock(user.tenantId, pagination);
+  }
+
+  @Get('inventory/expired')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Get already-expired inventory items (expiryDate < today, quantity > 0), paginated' })
+  @ApiOkResponse({ description: '{ data: InventoryItem[], total, limit, offset }' })
+  findExpired(
+    @CurrentUser() user: any,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.inventoryService.findExpired(user.tenantId, pagination);
   }
 
   @Post('inventory')

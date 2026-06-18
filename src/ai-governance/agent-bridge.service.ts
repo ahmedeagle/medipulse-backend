@@ -510,8 +510,37 @@ export class AgentBridgeService {
     });
 
     if (!catalog) {
+      // Fallback: check P2P marketplace before giving up
+      const [p2pListing] = await this.dataSource.query<{ id: string }[]>(`
+        SELECT pl.id
+        FROM p2p_listings pl
+        JOIN seller_profiles sp_seller ON sp_seller."pharmacyTenantId" = pl."sellerTenantId"
+          AND sp_seller."verificationStatus" = 'verified'
+        JOIN seller_profiles sp_buyer ON sp_buyer."pharmacyTenantId" = $2
+          AND sp_buyer.city = sp_seller.city
+        WHERE pl."productId" = $1
+          AND pl.status      = 'active'
+          AND pl.quantity    > 0
+          AND pl."sellerTenantId" != $2
+        LIMIT 1
+      `, [productId, approval.tenantId]);
+
+      if (p2pListing) {
+        await this.approvals.markExecuted(approval.tenantId, approval.id, {
+          action:     'navigate_to_p2p_marketplace',
+          deepLink:   `/pharmacy/p2p?tab=marketplace&productId=${productId}`,
+          productId,
+          listingId:  p2pListing.id,
+          sourceType: 'p2p_fallback',
+        });
+        this.logger.log(
+          `REORDER: no catalog supplier for ${productId} — P2P fallback listing ${p2pListing.id}`,
+        );
+        return;
+      }
+
       await this.approvals.markExecuted(approval.tenantId, approval.id, {
-        warning: 'لم يتم العثور على مورد متاح — تحقق من كتالوج الموردين',
+        warning: 'لم يتم العثور على مورد متاح في الكتالوج أو البورصة الدوائية — تحقق من كتالوج الموردين',
       });
       return;
     }

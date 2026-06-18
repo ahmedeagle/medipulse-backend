@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ForecastingController } from './forecasting.controller';
 import { DemandForecastingService } from './demand-forecasting.service';
@@ -40,7 +40,7 @@ import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
     NotificationsModule,
     PharmacySettingsModule,
     CronLockModule,
-    AiGovernanceModule,
+    forwardRef(() => AiGovernanceModule),
   ],
   controllers: [ForecastingController],
   providers: [DemandForecastingService, EoqService, DeadStockService, DeadStockCron],

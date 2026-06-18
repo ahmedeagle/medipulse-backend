@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -18,6 +18,7 @@ export class DeadStockCron {
     private readonly notificationService: NotificationService,
     private readonly pharmacySettings: PharmacySettingsService,
     private readonly cronLock: CronLockService,
+    @Inject(forwardRef(() => ApprovalService))
     private readonly approvals: ApprovalService,
     private readonly dataSource: DataSource,
     @InjectRepository(Tenant)

@@ -1,0 +1,1 @@
+﻿SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'inventory_items' AND column_name IN ('costPrice','salePrice','price') ORDER BY column_name;

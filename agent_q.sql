@@ -1,0 +1,1 @@
+﻿SELECT code, "nameEn", category FROM agent_definitions ORDER BY code;

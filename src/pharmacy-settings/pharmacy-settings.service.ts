@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { PharmacySettings } from './entities/pharmacy-settings.entity';
+import { PharmacySettings, NotificationSettings } from './entities/pharmacy-settings.entity';
 import { Warehouse } from './entities/warehouse.entity';
 import { UpsertPharmacySettingsDto, CreateWarehouseDto, UpdateWarehouseDto } from './dto/upsert-settings.dto';
 
@@ -41,6 +41,9 @@ export class PharmacySettingsService {
       inventorySettings: dto.inventorySettings
         ? { ...existing.inventorySettings, ...dto.inventorySettings }
         : existing.inventorySettings,
+      notificationSettings: dto.notificationSettings
+        ? { ...(existing.notificationSettings ?? {}), ...dto.notificationSettings }
+        : existing.notificationSettings,
     });
     return this.settingsRepo.save(merged);
   }
@@ -70,5 +73,26 @@ export class PharmacySettingsService {
     const wh = await this.warehouseRepo.findOne({ where: { id, pharmacyTenantId: tenantId } });
     if (!wh) throw new NotFoundException('Warehouse not found');
     await this.warehouseRepo.remove(wh);
+  }
+
+  async getNotifFlag(
+    tenantId: string,
+    flag: keyof NotificationSettings,
+  ): Promise<boolean> {
+    const s = await this.getSettings(tenantId);
+    const n = (s.notificationSettings ?? {}) as NotificationSettings;
+    const ai = (s.aiAnalysisSettings ?? {}) as any;
+    switch (flag) {
+      case 'enableDeadStockAlerts':
+        return n.enableDeadStockAlerts       ?? ai.enableDeadStockAlerts       ?? true;
+      case 'enableExpiryAlerts':
+        return n.enableExpiryAlerts          ?? ai.enableExpiryProtection      ?? true;
+      case 'enableSmartProcurementAlerts':
+        return n.enableSmartProcurementAlerts ?? ai.enableSmartProcurement     ?? true;
+      case 'enableLowStockAlerts':
+        return n.enableLowStockAlerts        ?? ai.enableLowStockAlerts        ?? true;
+      default:
+        return (n[flag] as boolean | undefined) ?? true;
+    }
   }
 }

@@ -63,6 +63,17 @@ export interface AiAnalysisSettings {
   forecastHorizonDays?: number;
 }
 
+export interface NotificationSettings {
+  enableLowStockAlerts?:          boolean;
+  enableExpiryAlerts?:            boolean;
+  enableDeadStockAlerts?:         boolean;
+  enableP2POrderAlerts?:          boolean;
+  enableSmartProcurementAlerts?:  boolean;
+  enableClearanceAlerts?:         boolean;
+  enablePosIntegrityAlerts?:      boolean;
+  enableMorningBriefing?:         boolean;
+}
+
 @Entity('pharmacy_settings')
 export class PharmacySettings {
   @PrimaryGeneratedColumn('uuid')
@@ -142,6 +153,10 @@ export class PharmacySettings {
   // ── AI smart-analyzer settings ───────────────────────────────────────────────
   @Column({ type: 'jsonb', default: '{}' })
   aiAnalysisSettings: AiAnalysisSettings;
+
+  // ── Notification preferences ─────────────────────────────────────────────
+  @Column({ type: 'jsonb', nullable: true, default: '{}' })
+  notificationSettings: NotificationSettings;
 
   // ── P2P Network ──────────────────────────────────────────────────────────────
   /** When true, other pharmacies can discover this pharmacy's live inventory via "Need Now" search (availability only — no prices exposed). */

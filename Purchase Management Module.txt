@@ -1,0 +1,438 @@
+Purchase Management Module
+June 2026
+End users: pharmacists & pharmacy managers
+4 screens · 3 modules
+Purchase invoices
+Purchase returns
+Wish list
+Payment tracking
+AI: OCR + anomaly
+Table of contents
+01
+Users & goals
+02
+Master workflow
+03
+Screen: create invoice
+04
+Screen: invoice register
+05
+Screen: wish list
+06
+Screen: create return
+07
+Screen: return register
+08
+AI features spec
+09
+Validation rules
+10
+Dev tickets
+01 — Users & goals
+Our end users are not technical. They are pharmacists and pharmacy managers who currently manage purchases on paper or in WhatsApp. Every screen must guide them step by step — no assumed knowledge, no jargon.
+
+PH
+Pharmacist (daily user)
+Receives supplier deliveries, enters invoices, adds products to reorder list. Works fast, under pressure, often on mobile. Does not understand accounting terms like "debit note" or "COGS."
+Pain: types the same invoice data 3x per week
+MG
+Pharmacy manager (weekly user)
+Reviews what was purchased, follows up on unpaid invoices, approves returns, checks if supplier credits came back. Needs a clear dashboard view and payment status per invoice.
+Pain: doesn't know what's owed to which supplier
+02 — Master workflow
+Every purchase interaction fits into one of three paths. The system must make the right path obvious from the first tap.
+
+Path A
+Create invoice from delivery
+Path B
+Reorder from wish list
+Path C
+Return goods to supplier
+Path A — Enter a supplier delivery invoice
+Supplier arrives → pharmacist opens "create invoice" → selects supplier → adds products one by one (or via OCR scan) → sets quantities, prices, expiry dates → saves draft → confirms when ready → inventory is updated automatically.
+
+Path B — Reorder low-stock items
+System auto-populates wish list from stock levels → pharmacist opens wish list → reviews items → taps "create purchase" → system pre-fills a new invoice with those items and the last supplier → pharmacist confirms quantities and prices → confirms.
+
+Path C — Return goods to supplier
+Pharmacist opens "create return" → selects supplier → enters original supplier invoice date + number → adds products to return with quantities → sets return price → confirms → inventory decremented → return register updated with payment status.
+
+03 — Screen: create purchase invoice
+Reference: Screenshots 1 & 4. This is the highest-frequency screen. A pharmacist will use it every time a supplier delivers goods — often multiple times per day. It must be fast, forgiving, and hard to get wrong.
+
+Create invoice Draft
+Save draft
+Confirm order
+Scan supplier invoice with camera — we'll fill this form for you automatically
+PO number (auto)
+PO-003
+Date & time (auto)
+23-06-2026 · 10:30
+Supplier *
+Select supplier...
+Invoice number
+Enter invoice no.
+Invoice date *
+DD/MM/YYYY
+Payment method *
+Cash / Credit card
+Payment status *
+Pending payment
+Discount on total
+% or fixed amount
+ Add at least one product to confirm this invoice
+#	Product name	Expiry	Qty	Free	Price	Disc %	Total
+Search for a product above to add it here
+Subtotal: EGP 0.00
+
+Discount: EGP 0.00
+
+Tax: EGP 0.00
+
+
+the design have different color oin this from out branch it should white and emraled only 
+EGP 0.00
+SCR-01saved 
+Header fields spec
+Field	Required	Type	Notes for dev
+PO number	Auto	System-generated	Format: PO-{n}. Auto-increment. Read-only. Display on all invoice views.
+Date & time	Auto	System timestamp	Set on creation. Read-only. Display in user's local timezone.
+Supplier	Required	Dropdown search	Searchable. Must be pre-configured in supplier master. Show last-used at top of list.
+Supplier invoice no.	Optional	Text	Free text. Used for reconciliation. AI OCR should auto-fill this.
+Invoice date	Required	Date picker	Cannot be in the future. Must be DD/MM/YYYY format. AI OCR should auto-fill.
+Payment method	Required	Dropdown	Options: Cash, Credit card, Bank transfer, Credit term. Persisted as last-used default.
+Payment status	Required	Dropdown	Options: Pending, Paid. Default = Pending. Can be changed later from invoice list.
+Discount on total	Optional	Toggle + input	Toggle between % and fixed amount. Applied after line totals are summed. Cannot exceed total.
+Notes	Optional	Textarea	Free text. Max 500 chars. Not printed on invoice — internal memo only.
+SCR-01
+Product line fields spec
+Field	Required	Type	Notes for dev
+Product name	Required	Search autocomplete	Search by name or barcode. Show: last purchase price, current stock, last supplier in dropdown results.
+Serial / batch number	Optional	Text	Used for batch traceability. Store per line. AI OCR should auto-fill from scan.
+Expiry date	Required	Date picker	Must be in the future. Warn if expiry < 3 months away. AI OCR auto-fills from scan.
+Sale price (per unit)	Required	Number	This is the price the pharmacy will sell it at — pre-filled from product master, editable.
+Purchase quantity	Required	Number (integer)	Must be > 0. Tap +/- buttons on mobile. Cannot be negative.
+Free goods qty	Optional	Number (integer)	Units given free by supplier (not charged). Added to stock but not to cost. Default = 0.
+Purchase price	Required	Number (decimal)	Price per unit. Trigger AI anomaly check: if >20% above historical avg, show warning inline.
+Discount %	Optional	Number (0–100)	Per-line discount. Auto-calculates discounted subtotal. Default = 0.
+Tax %	Required	Number (auto)	Pre-filled from product's tax category. Show calculated tax amount. Editable override allowed.
+Line total	Auto	Calculated	= (purchase price × qty) − discount + tax. Read-only. Recalculate on every field change.
+SCR-01
+Step-by-step UX flow — pharmacist view
+For UI/UX team
+1
+User opens "Create invoice"
+PO number and timestamp auto-fill. All other fields blank. Confirm button is disabled (greyed out) until validation passes.
+Show a blue hint banner: "Have the paper invoice? Tap the camera icon to fill this form automatically."
+2
+User selects supplier
+Searchable dropdown. As soon as supplier is selected, show their last 3 invoices as a small history chip below the field — builds confidence.
+If only one supplier exists, auto-select it and skip this step visually.
+3
+User fills invoice number and date
+Both optional but encouraged. Show helper text: "Enter the number printed on the paper invoice." Date defaults to today.
+ If OCR was used, these are already filled — skip to step 5.
+4
+User sets payment method and status
+Payment method persists from last invoice (most pharmacies use one method per supplier). Payment status defaults to "Pending."
+5
+User searches for a product to add
+Search by product name or barcode scan. Autocomplete dropdown shows: product name, current stock level, last purchase price from this supplier.
+On mobile: show a large barcode scan button alongside the search field.
+6
+Product row appears — user fills details
+Expiry date, quantity, free goods, purchase price, discount % are the key inputs per row. Sale price pre-fills from product master. Tax pre-fills from product category.
+If expiry date is within 3 months: show orange warning "Expiry date is close — confirm with supplier."
+7
+Purchase price entered — AI anomaly check fires
+System checks entered price against historical average for this SKU + supplier combination.
+ If deviation >20%: show inline warning "This price is X% higher than your last purchase from [supplier]. Continue?"
+8
+User repeats step 5–7 for each product
+Grand total updates live at the bottom after every product addition or edit.
+9
+User taps "Save draft" or "Confirm order"
+Draft: saves without inventory update, no validation required except PO number. Confirm: runs full validation, then updates inventory and locks the invoice.
+Block confirm if: no supplier selected, no products added, any product has qty = 0, total = 0.
+10
+Confirmation success screen
+Show: PO number, supplier name, total value, product count. Two buttons: "View invoice" and "Create another." Do NOT auto-navigate away — user may need to print.
+Invoice state machine:
+Draft
+→ confirm →
+Received
+→ pay →
+Paid
+Draft can be edited freely. Received is locked for editing — only payment status can change. Paid is fully locked. Cancellation from Draft or Received requires manager-level permission.
+04 — Screen: invoice register
+Reference: Screenshot 2. The manager's main view. Shows all invoices with status, value, and quick actions. Must be scannable at a glance.
+
+SCR-02
+Dashboard tiles (top of page)
+Tile	Value shown	Logic
+This month: invoice count	Integer	Count of confirmed invoices where creation date is in current calendar month.
+This month: total value	EGP amount	Sum of grand totals for confirmed invoices in current month.
+Drafts pending	Integer	Count of invoices in Draft state. Tap to filter list to drafts only.
+SCR-02
+Invoice list columns
+Column	Sortable	Notes
+PO number	Yes	Tap to open invoice detail. Format: PO-{n}.
+Creation date	Yes	Date + time. Default sort: newest first.
+Supplier name	Yes	Tappable — filter list to this supplier.
+Product count	No	Number of distinct product lines on this invoice.
+Supplier invoice date	Yes	The date printed on the supplier's paper invoice.
+Invoice status	Yes	Pill badge: Draft (amber), Received (blue), Cancelled (red).
+Payment method	No	Text: Cash / Credit card / Bank transfer / Credit term.
+Payment status	Yes	Pill badge: Pending (amber), Paid (green). Tappable inline toggle for manager role.
+Total value	Yes	EGP formatted with 2 decimals. Right-aligned.
+Actions (⋮)	No	Menu: View, Edit (draft only), Mark as paid, Download PDF, Cancel.
+SCR-02
+Filter & search behaviour
+Search bar
+Searches across: PO number, supplier name, product name within invoice, supplier invoice number. Real-time as user types (debounce 300ms).
+Filter panel (drawer on mobile, inline on desktop)
+Filter by: date range (from/to), supplier (multi-select), invoice status (multi-select), payment status (multi-select). Show active filter count as badge on filter button.
+Download button
+Exports current filtered list as Excel (.xlsx). Columns match table view. Filename: purchases_{YYYY-MM-DD}.xlsx.
+05 — Screen: wish list
+Reference: Screenshot 3. This is the bridge between inventory management and purchasing. A pharmacist should open this screen when they need to reorder — and find it already populated with what needs buying.
+
+SCR-03
+Auto-population logic (AI-assisted)
+1
+System calculates reorder point per product
+Reorder point = average daily sales × lead time days (default: 7 days). Recalculates nightly from sales data.
+ Background job runs at 2am daily. No manual trigger needed.
+2
+Product appears in wish list when stock ≤ reorder point
+System adds it with: product name, recommended quantity (= reorder qty − current stock), last supplier who provided this product.
+3
+Pharmacist can also manually add any product
+Search field at top of wish list. Manually added items marked with a "Manual" badge so they're visually distinct from auto-added ones.
+4
+Pharmacist reviews list, edits quantities if needed, then taps "Create purchase"
+System groups selected items by last supplier → creates one draft invoice per supplier → pharmacist is taken to the invoice creation screen with items pre-filled.
+If items span 3 suppliers: show confirmation "This will create 3 draft invoices — one per supplier. Continue?"
+5
+After invoice is confirmed, remove items from wish list
+Items linked to a confirmed invoice are automatically removed. Items linked to a draft invoice are marked "In draft PO-{n}" so they're not double-ordered.
+SCR-03
+Wish list table columns
+Column	Notes
+Product name	Tappable — opens product detail sheet.
+Product identifier	Barcode or internal SKU code.
+Date added	When it was added (auto or manual).
+Current stock	Show live from inventory. Red if zero.
+Requested quantity	Editable inline. Defaults to recommended qty from system.
+Last supplier	Supplier who last sold this product to the pharmacy.
+Source	Badge: "Auto" (teal) or "Manual" (gray).
+Actions	Remove from list, change supplier.
+06 — Screen: create purchase return
+Reference: Screenshot 5. Used when goods need to go back to the supplier — damaged, expired, wrong product, or over-ordered. Must create a clear paper trail and correctly reverse inventory.
+
+SCR-04
+Return header fields
+Field	Required	Notes for dev
+Return number	Auto	Format: RPO-{n}. Auto-increment. Read-only.
+Supplier	Required	Selecting supplier filters available products to only those purchased from this supplier.
+Supplier invoice date	Required	The date of the original purchase invoice from this supplier. Used to match credit note.
+Supplier invoice number	Optional	Free text. Helps supplier match the return to original invoice on their end.
+Payment method	Required	How the supplier will credit back — Cash, Bank transfer, etc.
+Payment status	Required	Pending / Paid. Tracks if credit was actually received.
+Apply discount on total	Optional	Toggle. If supplier deducts a restocking fee, apply it here.
+Notes	Optional	Reason for return — free text. Max 500 chars.
+SCR-04
+Return product line fields
+Field	Required	Notes for dev
+Product name	Required	Only products purchased from the selected supplier are shown in search.
+Expiry date	Required	Pre-fills from batch. Must match a known batch in inventory.
+Available qty	Auto	Current stock of this product+batch. Read-only. User cannot return more than available.
+Return qty	Required	Must be > 0 and ≤ available qty. Validation: block confirm if exceeded.
+Free goods qty	Optional	If returning any free-goods units. Does not affect credit note value.
+Return price	Required	Pre-fills from original purchase price. Editable if supplier offers different credit amount.
+Discount %	Optional	Supplier may deduct from credit. Default = 0.
+Tax %	Auto	Pre-fills from product category. Read-only.
+Line total	Auto	= (return price × qty) − discount + tax. Recalculate on every change.
+SCR-04
+Step-by-step UX flow — return creation
+1
+User opens "Create return"
+RPO number auto-fills. Confirm button disabled. Show helper text at top: "Use this screen to return goods to a supplier and track the credit you'll receive back."
+2
+User selects supplier
+After selection, the product search below automatically filters to only show products that were purchased from this supplier.
+Show tip: "Only products from this supplier will appear in the product search below."
+3
+User enters supplier invoice date
+This links the return to the original delivery. Date picker — most recent dates shown first. Helper: "Enter the date from the original paper invoice."
+Block confirm if invoice date is not set.
+4
+User searches for product to return
+Search filtered to supplier. Results show: product name, current stock, batch/expiry. Selecting a product pre-fills available qty and return price from original purchase.
+5
+User enters return quantity
+Cannot exceed available stock of that batch. If user enters too many: show red validation "You only have {n} units available to return."
+Hard block: prevent confirm if any line qty exceeds available stock.
+6
+User confirms return
+System: decrements inventory for returned units, logs return in register, sets payment status to Pending (credit not yet received), shows success screen with return number.
+07 — Screen: return register
+Reference: Screenshot 6. Manager view of all returns. Focus is on: was the credit received? Same pattern as invoice register.
+
+SCR-05
+Return register columns
+Column	Notes
+Return number (RPO-n)	Tappable — opens return detail.
+Creation date	Date + time. Default sort: newest first.
+Supplier	Supplier name.
+Products count	Number of distinct product lines returned.
+Supplier invoice date	From original purchase.
+Return status	Draft (amber) / Confirmed (green). Confirmed = inventory already decremented.
+Payment method	How credit will be returned.
+Payment status	Pending (amber) / Paid (green). Manager can toggle inline.
+Total credit value	EGP amount expected back from supplier.
+Actions (⋮)	View, Download PDF, Mark credit received.
+08 — AI features specification
+Three AI features are included. Each solves a specific manual burden. No chatbots, no conversational UI. AI runs silently in the background or triggers as an inline helper — never as a separate screen.
+
+AI Feature 1: Invoice OCR from camera scan
+1
+What it does
+Pharmacist taps the camera icon on the create invoice screen. Takes a photo of the paper supplier invoice. AI extracts: supplier name, invoice number, invoice date, product lines (name, quantity, price). Pre-fills the form. Pharmacist reviews and corrects anything before confirming.
+
+Trigger: camera button on create invoice screen header
+2
+Dev implementation notes
+Use a document OCR API (Google Vision, AWS Textract, or Azure Form Recognizer). Send image as base64. Parse response to extract table-structured invoice data. Map extracted product names to internal product catalog via fuzzy match (confidence threshold: 80%). Fields below threshold shown highlighted in yellow — user must confirm manually.
+
+Show extraction confidence per field: green tick (≥80%), yellow warning (<80%), red x (not found)
+3
+UX behaviour
+After scan: show loading spinner "Reading your invoice..." (max 5 seconds). On success: form pre-fills with a blue "AI filled" badge on each auto-filled field. On failure: "We couldn't read this invoice clearly — you can fill it in manually." Never block the user from proceeding manually.
+
+AI Feature 2: Purchase price anomaly detection
+1
+What it does
+When a pharmacist enters a purchase price for a product, the system compares it to the rolling average of the last 10 purchase prices for that product from the same supplier. If the new price deviates by more than 20%, show an inline warning — not a blocking error — so the pharmacist can verify before saving.
+
+Trigger: on blur of purchase price field on any invoice line
+2
+Warning message copy
+"This price (EGP X) is Y% higher than your average from [Supplier] (EGP Z). Double-check the paper invoice." — with a "Looks correct, continue" dismiss button. Do NOT block saving. Log all warnings and dismissals for manager reporting.
+
+3
+Data requirement
+Requires at least 3 prior purchase records for this product+supplier combination to fire. If fewer than 3 records exist: do not show warning. Store price history per product per supplier in purchase_price_history table.
+
+AI Feature 3: Automatic wish list population
+1
+What it does
+A nightly background job scans every active product. For each product: calculates average daily sales (last 30 days) × 7 days lead time = reorder point. If current stock ≤ reorder point AND product is not already in wish list AND no pending/draft purchase order exists for this product: add to wish list automatically.
+
+Trigger: cron job, runs at 2:00am daily
+2
+What gets pre-filled on wish list entry
+Recommended order quantity = reorder point × 2 (two weeks supply) − current stock. Last supplier = most recent confirmed supplier for this product. Both are editable by pharmacist before creating the purchase.
+
+3
+Edge cases
+Products with zero sales in last 30 days: skip (no demand signal). Products with no purchase history: skip. Products already on a draft PO: mark as "In draft — PO-{n}" instead of adding again.
+
+09 — Validation rules
+Cannot confirm invoice without supplier selected. Show: "Please select a supplier before confirming."
+Block
+Cannot confirm invoice with zero products. Show: "Add at least one product to confirm this invoice."
+Block
+Cannot confirm invoice if any product line has qty = 0. Show: "Quantity must be greater than zero for all products."
+Block
+Cannot confirm invoice if total = 0. Show: "Total value must be greater than zero."
+Block
+Cannot return more units than available in stock. Show: "You only have {n} units of [product] available to return."
+Block
+Cannot set invoice date in the future. Show: "Invoice date cannot be in the future."
+Block
+Product expiry date within 3 months. Show inline: "This product expires soon — confirm with your supplier before ordering."
+Warn only
+Purchase price deviates >20% from historical average. Show inline: "This price is X% higher than your usual price. Double-check the invoice." Dismissable.
+Warn only
+Wish list item already on a draft PO. Show: "This item is already in draft PO-{n} — adding it again may cause a duplicate order."
+Warn only
+Return supplier invoice date is required. Block confirm on return if not set. Show: "Please enter the date of the original supplier invoice."
+Block
+Discount percentage must be 0–100. Prevent entry of values outside this range on all discount fields.
+Block
+10 — Dev tickets (sprint breakdown)
+Suggested sprint structure. P1 = sprint 1 (core flow must work), P2 = sprint 2 (completeness), P3 = sprint 3 (AI + enhancements).
+
+PUR-001
+Purchase invoice — create & header form
+P1
+Build the create invoice screen header section. All fields per SCR-01 field spec. Auto-generate PO number. Auto-timestamp. Save draft and confirm buttons with disabled state logic.
+
+PUR-002
+Purchase invoice — product line table
+P1
+Product search autocomplete with current stock + last price shown in results. Add product row with all line fields. Inline +/- quantity control. Auto-calculate line total on every change. Running grand total footer.
+
+PUR-003
+Purchase invoice — state machine & inventory update
+P1
+Draft → Received state transition. On confirm: run all blocking validations (section 09), update inventory stock levels for all product lines (add purchased qty, add free goods qty as separate record), lock invoice for editing.
+
+PUR-004
+Invoice register — list view with dashboard tiles
+P1
+All columns per SCR-02. Dashboard tiles (this month count, this month value, drafts count). Default sort newest first. Pagination (10/25/50 per page). Inline payment status toggle for manager role.
+
+PUR-005
+Invoice register — search & filter
+P2
+Real-time search (300ms debounce) across PO number, supplier, product names, supplier invoice number. Filter panel: date range, supplier multi-select, status multi-select, payment status. Active filter badge count.
+
+PUR-006
+Invoice register — export to Excel
+P2
+Download current filtered list as .xlsx. Columns match table view. Filename: purchases_YYYY-MM-DD.xlsx. Use server-side generation to handle large datasets.
+
+PUR-007
+Purchase return — create form & product lines
+P1
+Full create return screen per SCR-04. Auto-generate RPO number. Supplier selection filters product search. Available qty shown read-only per product line. Blocking validation: return qty ≤ available qty. On confirm: decrement inventory.
+
+PUR-008
+Return register — list view
+P2
+All columns per SCR-05. Same filter/search pattern as invoice register. Inline "Mark credit received" action changes payment status to Paid.
+
+PUR-009
+Wish list — manual add & display
+P2
+Wish list screen with manual product search and add. All columns per SCR-03 spec. Inline quantity edit. "Create purchase" button that groups by last supplier and creates draft invoices. Remove item action.
+
+PUR-010
+Wish list — auto-population cron job
+P2
+Background job at 2am daily. Calculate reorder point per product (avg daily sales × 7). If stock ≤ reorder point and not already in wish list and no pending PO: add to wish list with recommended qty and last supplier. Skip products with <3 sales records.
+
+PUR-011
+AI: Invoice OCR scan
+P3
+Camera button on create invoice screen. Integrates with OCR API. Parse response for: supplier name, invoice number, invoice date, product table. Fuzzy-match product names to catalog (80% threshold). Show confidence badges per field (green/yellow/red). Never block manual entry if OCR fails.
+
+PUR-012
+AI: Purchase price anomaly detection
+P3
+On blur of purchase price field: fetch rolling average of last 10 purchase prices for this product+supplier. If new price deviates >20%: show inline dismissable warning. Requires purchase_price_history table. Only fires if ≥3 historical records exist. Log all warnings and user dismissals.
+
+PUR-013
+PDF download — invoice & return printout
+P2
+Downloadable PDF for individual invoices and returns. Include: PO/RPO number, date, supplier details, product lines table, totals breakdown, payment status. Professional layout — pharmacies send these to their accountant.
+
+PUR-014
+Validation rules — all screens
+P1
+Implement all 11 rules from section 09. Block rules: prevent confirm and show toast. Warn rules: show inline dismissable warning, still allow proceed. All error messages use the exact copy from the spec.
+
+PRD v1.0 — Purchase Management Module. Based on analysis of 6 Aumet screenshots. Screens referenced: create invoice (×2), invoice register, wish list, create return, return register. AI features scoped to file processing and background automation only — no conversational AI. All copy and validation messages are final and ready for implementation.
+

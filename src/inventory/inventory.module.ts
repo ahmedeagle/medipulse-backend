@@ -27,6 +27,7 @@ import { ImportBatchRow } from './entities/import-batch-row.entity';
 import { NormalizationModule } from '../normalization/normalization.module';
 import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
 import { MATCH_QUEUE } from './match.constants';
 
 @Module({
@@ -40,6 +41,7 @@ import { MATCH_QUEUE } from './match.constants';
     NormalizationModule,
     forwardRef(() => AiGovernanceModule),
     NotificationsModule,
+    PharmacySettingsModule,
   ],
   controllers: [InventoryController, ProductRecallController],
   providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron, LostRevenueCron],

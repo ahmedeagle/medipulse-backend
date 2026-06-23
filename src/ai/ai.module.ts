@@ -32,7 +32,7 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     BullModule.registerQueue({ name: AI_RECOMMENDATIONS_QUEUE }),
     forwardRef(() => InventoryModule),
     SupplierModule,
-    ForecastingModule,
+    forwardRef(() => ForecastingModule),
     RedisModule,
   ],
   controllers: [],

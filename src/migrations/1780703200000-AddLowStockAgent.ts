@@ -9,9 +9,9 @@ export class AddLowStockAgent1780703200000 implements MigrationInterface {
         code, "nameEn", "nameAr", category,
         "descriptionEn", "descriptionAr",
         skills, permissions, restrictions, "outputTypes",
-        enabled, "minConfidence", "requiresApproval", phase, "iconKey"
+        "defaultEnabled", "minConfidence", "requiresApproval", phase, "iconKey"
       )
-      VALUES (
+      SELECT
         'low_stock_replenishment',
         'Low Stock Replenishment',
         'مراقب نقص المخزون',
@@ -23,8 +23,7 @@ export class AddLowStockAgent1780703200000 implements MigrationInterface {
         '["no_auto_order","no_price_changes"]'::jsonb,
         '["replenishment_guidance","p2p_redirect","procurement_redirect"]'::jsonb,
         true, 0.75, true, 1, 'alert-circle'
-      )
-      ON CONFLICT (code) DO NOTHING
+      WHERE NOT EXISTS (SELECT 1 FROM agent_definitions WHERE code = 'low_stock_replenishment')
     `);
   }
 

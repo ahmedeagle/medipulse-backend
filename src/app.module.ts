@@ -38,6 +38,7 @@ import { ChatModule }             from './chat/chat.module';
 import { PosModule }              from './pos/pos.module';
 import { FraudModule }            from './fraud/fraud.module';
 import { FeatureRequestsModule }  from './feature-requests/feature-requests.module';
+import { PurchasesModule }        from './purchases/purchases.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 
 @Module({
@@ -143,6 +144,8 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     FeatureRequestsModule,
     // ── Point of Sale ─────────────────────────────────────────────────────────
     PosModule,
+    // ── Purchase Management ───────────────────────────────────────────────────
+    PurchasesModule,
   ],
 
   providers: [

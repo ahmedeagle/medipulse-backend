@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { DataSource } from 'typeorm';
 import { ApprovalService } from '../ai-governance/approval.service';
 import { NotificationService } from '../notifications/notification.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 /**
  * Runs every hour. Analyzes recently closed shifts for:
@@ -26,6 +27,7 @@ export class PosIntegrityMonitorCron {
     private readonly dataSource:     DataSource,
     private readonly approvalService: ApprovalService,
     private readonly notifications:  NotificationService,
+    private readonly settingsSvc:    PharmacySettingsService,
   ) {}
 
   @Cron('*/15 * * * *')
@@ -124,13 +126,15 @@ export class PosIntegrityMonitorCron {
         },
       });
 
-      await this.notifications.create({
-        tenantId:    row.tenantId,
-        type:        'pos_integrity_alert' as any,
-        title:       'تنبيه: فرق نقدي في شفت مغلق',
-        body:        `شفت الكاشير ${row.cashierName ?? '—'} يحتاج مراجعة — الفرق EGP ${variance.toFixed(2)}`,
-        resourceRef: `pos_shift:${row.id}`,
-      });
+      if (await this.settingsSvc.getNotifFlag(row.tenantId, 'enablePosIntegrityAlerts')) {
+        await this.notifications.create({
+          tenantId:    row.tenantId,
+          type:        'pos_integrity_alert' as any,
+          title:       'تنبيه: فرق نقدي في شفت مغلق',
+          body:        `شفت الكاشير ${row.cashierName ?? '—'} يحتاج مراجعة — الفرق EGP ${variance.toFixed(2)}`,
+          resourceRef: `pos_shift:${row.id}`,
+        });
+      }
 
       this.logger.warn(`Cash mismatch flagged: shift ${row.id}, variance ${variance.toFixed(2)}`);
     }

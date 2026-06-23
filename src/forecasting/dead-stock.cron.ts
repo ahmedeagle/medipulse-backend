@@ -46,7 +46,7 @@ export class DeadStockCron {
     for (const tenantId of tenants) {
       try {
         const settings = await this.pharmacySettings.getSettings(tenantId);
-        if (settings.aiAnalysisSettings?.enableDeadStockAlerts === false) continue;
+        if (!await this.pharmacySettings.getNotifFlag(tenantId, 'enableDeadStockAlerts')) continue;
 
         const analyses = await this.deadStockService.analyzeDeadStock(tenantId);
         const critical = analyses.filter((a) => a.urgencyScore >= 70);
@@ -78,7 +78,7 @@ export class DeadStockCron {
         await this.notificationService.create({
           tenantId,
           type: 'dead_stock',
-          title: `📦 ${critical.length} منتج راكد يستنزف ${Math.round(totalValue).toLocaleString()} ر.س`,
+          title: `📦 ${critical.length} منتج راكد يستنزف ${Math.round(totalValue).toLocaleString()} ${settings.currency}`,
           body: `${names}${critical.length > 3 ? ` و${critical.length - 3} آخرين` : ''} — لم تتحرك لفترة طويلة. راجعها في مركز الذكاء`,
           resourceRef: '/pharmacy/ai-center?tab=tasks&task=dead_stock',
         });

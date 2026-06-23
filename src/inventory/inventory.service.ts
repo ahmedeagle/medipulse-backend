@@ -14,6 +14,7 @@ import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
 import { NotificationService } from '../notifications/notification.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 import {
   normalizePagination,
   PaginatedResult,
@@ -29,6 +30,7 @@ export class InventoryService {
     private productRepository: Repository<Product>,
     private readonly eventEmitter: EventEmitter2,
     private readonly notificationService: NotificationService,
+    private readonly settingsSvc: PharmacySettingsService,
   ) {}
 
   async findAll(
@@ -197,7 +199,7 @@ export class InventoryService {
       const alreadySent = await this.notificationService.findTodayLowStockAlert(
         tenantId, dto.productId, todayKey,
       );
-      if (!alreadySent) {
+      if (!alreadySent && await this.settingsSvc.getNotifFlag(tenantId, 'enableLowStockAlerts')) {
         await this.notificationService.create({
           tenantId,
           type: 'low_stock',
@@ -247,13 +249,15 @@ export class InventoryService {
           daysToExpiry,
         });
       } else if (daysToExpiry <= 0) {
-        await this.notificationService.create({
-          tenantId,
-          type: 'expired_stock',
-          title: `🚨 منتج منتهي الصلاحية: ${productNameAr}`,
-          body: `هذا المنتج انتهت صلاحيته — يجب عزله فوراً (الكمية: ${dto.quantity ?? 0} وحدة)`,
-          resourceRef: `/pharmacy/inventory?productId=${dto.productId}`,
-        });
+        if (await this.settingsSvc.getNotifFlag(tenantId, 'enableExpiryAlerts')) {
+          await this.notificationService.create({
+            tenantId,
+            type: 'expired_stock',
+            title: `🚨 منتج منتهي الصلاحية: ${productNameAr}`,
+            body: `هذا المنتج انتهت صلاحيته — يجب عزله فوراً (الكمية: ${dto.quantity ?? 0} وحدة)`,
+            resourceRef: `/pharmacy/inventory?productId=${dto.productId}`,
+          });
+        }
       }
     }
 
@@ -330,7 +334,7 @@ export class InventoryService {
           tenantId, item.productId, todayKey,
         );
         const productNameAr = (updated as any).product?.nameAr ?? (updated as any).product?.name ?? 'منتج';
-        if (!alreadySent) {
+        if (!alreadySent && await this.settingsSvc.getNotifFlag(tenantId, 'enableLowStockAlerts')) {
           await this.notificationService.create({
             tenantId,
             type: 'low_stock',

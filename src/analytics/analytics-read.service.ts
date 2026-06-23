@@ -7,6 +7,100 @@ import { Tenant } from '../auth/entities/tenant.entity';
 import { SupplierProfile } from '../supplier/entities/supplier-profile.entity';
 import { WeeklyAnalyticsSnapshot } from './entities/weekly-analytics-snapshot.entity';
 
+export interface SalesSummaryRow {
+  period:               string;
+  salesBeforeDiscount:  number;
+  totalSales:           number;
+  totalReturns:         number;
+  netSales:             number;
+  invoiceCount:         number;
+  avgInvoice:           number;
+  totalDiscounts:       number;
+  totalTax:             number;
+  cogs:                 number;
+  grossMargin:          number;
+  grossMarginPct:       number;
+  // Monthly extras
+  monthStart?:    string;
+  monthEnd?:      string;
+  year?:          number;
+  monthNumber?:   number;
+  // Weekly extras
+  weekStart?:     string;
+  weekEnd?:       string;
+  weekNumber?:    number;
+}
+
+export interface ProductSalesRow {
+  productCode:        string;
+  productName:        string;
+  category:           string;
+  saleDate:           string;
+  qtySold:            number;
+  avgQtyPerInvoice:   number;
+  invoiceCount:       number;
+  totalDiscounts:     number;
+  totalSales:         number;
+  salesBeforeDiscount: number;
+  totalReturns:       number;
+  netSales:           number;
+  totalTax:           number;
+  cogs:               number;
+  grossMargin:        number;
+  grossMarginPct:     number;
+}
+
+export interface InventoryReportRow {
+  productCode:      string;
+  productName:      string;
+  barcode:          string;
+  category:         string;
+  stockQty:         number;
+  costValue:        number;
+  sellValue:        number;
+  availableForSale: number;
+  nearExpiryQty:    number;
+  expiredQty:       number;
+  avgCostPrice:     number;
+  avgSellPrice:     number;
+  status:           'active' | 'near_expiry' | 'expired' | 'low_stock';
+  avgDiscount:      number;
+  minDiscount:      number;
+  maxDiscount:      number;
+  avgFreeUnits:     number;
+  minFreeUnits:     number;
+  maxFreeUnits:     number;
+  avgProfitPerUnit: number;
+}
+
+export interface ExpiryReportRow {
+  inventoryItemId: string;
+  productCode:     string;
+  productName:     string;
+  barcode:         string;
+  batchNumber:     string;
+  expiryDate:      string;
+  daysUntilExpiry: number;
+  quantity:        number;
+  costPrice:       number;
+  sellingPrice:    number;
+  costValue:       number;
+  category:        string;
+}
+
+export interface InsuranceClaimsRow {
+  invoiceDate:            string;
+  insuranceCompany:       string;
+  insuranceCompanyId:     string;
+  patientCount:           number;
+  invoiceCount:           number;
+  totalSales:             number;
+  insuranceCoveredAmount: number;
+  patientDueAmount:       number;
+  reimbursementAmount:    number;
+  pendingAmount:          number;
+}
+
 export interface DemandSignal {
   productId:       string;
   productName:     string;
@@ -225,6 +319,268 @@ export class AnalyticsReadService {
     });
   }
 
+  // ─── Sales Summary Report ─────────────────────────────────────────────────
+
+  async getSalesSummary(
+    tenantId: string,
+    params: {
+      granularity: 'daily' | 'weekly' | 'monthly';
+      dateFrom: string;
+      dateTo: string;
+      cashierName?: string;
+    },
+  ): Promise<SalesSummaryRow[]> {
+    const { granularity, dateFrom, dateTo, cashierName } = params;
+
+    let trunc: string, fmt: string;
+    switch (granularity) {
+      case 'monthly': trunc = 'month'; fmt = 'YYYY-MM';       break;
+      case 'weekly':  trunc = 'week';  fmt = 'IYYY-"W"IW';    break;
+      default:        trunc = 'day';   fmt = 'YYYY-MM-DD';
+    }
+
+    // Shift dateTo to be exclusive (include the full last day)
+    const dateToExclusive = new Date(dateTo);
+    dateToExclusive.setDate(dateToExclusive.getDate() + 1);
+    const dateToStr = dateToExclusive.toISOString().split('T')[0];
+
+    const bindings: any[] = [tenantId, dateFrom, dateToStr];
+    let cashierFilter = '';
+    if (cashierName?.trim()) {
+      bindings.push(`%${cashierName.trim()}%`);
+      cashierFilter = `AND EXISTS (
+          SELECT 1 FROM pos_shifts s
+          WHERE s.id = "shiftId"
+            AND COALESCE(s."cashierName", '') ILIKE $${bindings.length}
+        )`;
+    }
+
+    const rows: any[] = await this.dataSource.query(`
+      WITH filtered_tx AS (
+        SELECT
+          id,
+          type,
+          subtotal,
+          "discountAmount",
+          "taxAmount",
+          "totalAmount",
+          DATE_TRUNC('${trunc}', "createdAt") AS period
+        FROM pos_transactions
+        WHERE "pharmacyTenantId" = $1
+          AND status = 'completed'
+          AND "createdAt" >= $2::date
+          AND "createdAt" < $3::date
+          ${cashierFilter}
+      ),
+      tx_cogs AS (
+        SELECT
+          ti."transactionId",
+          SUM(ti.quantity * COALESCE(i."costPrice", 0)) AS cogs
+        FROM pos_transaction_items ti
+        JOIN filtered_tx f ON f.id = ti."transactionId"
+        LEFT JOIN inventory_items i ON i.id = ti."inventoryItemId"
+        GROUP BY ti."transactionId"
+      ),
+      period_data AS (
+        SELECT
+          f.period,
+          f.type,
+          f.subtotal,
+          f."discountAmount",
+          f."taxAmount",
+          f."totalAmount",
+          COALESCE(c.cogs, 0) AS cogs
+        FROM filtered_tx f
+        LEFT JOIN tx_cogs c ON c."transactionId" = f.id
+      )
+      SELECT
+        TO_CHAR(period, '${fmt}') AS period,
+        ROUND(SUM(CASE WHEN type = 'sale' THEN subtotal + "discountAmount" ELSE 0 END)::numeric, 2) AS "salesBeforeDiscount",
+        ROUND(SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalSales",
+        ROUND(SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalReturns",
+        ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END))::numeric, 2) AS "netSales",
+        COUNT(CASE WHEN type = 'sale' THEN 1 END)::int AS "invoiceCount",
+        ROUND(COALESCE(AVG(CASE WHEN type = 'sale' THEN "totalAmount" END), 0)::numeric, 2) AS "avgInvoice",
+        ROUND(SUM(CASE WHEN type = 'sale' THEN "discountAmount" ELSE 0 END)::numeric, 2) AS "totalDiscounts",
+        ROUND(SUM(CASE WHEN type = 'sale' THEN "taxAmount" ELSE 0 END)::numeric, 2) AS "totalTax",
+        ROUND(SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END)::numeric, 2) AS "cogs",
+        ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END))::numeric, 2) AS "grossMargin"
+      FROM period_data
+      GROUP BY period
+      ORDER BY period
+    `, bindings);
+
+    return rows.map(r => {
+      const netSales    = Number(r.netSales);
+      const grossMargin = Number(r.grossMargin);
+      const base: SalesSummaryRow = {
+        period:               r.period,
+        salesBeforeDiscount:  Number(r.salesBeforeDiscount),
+        totalSales:           Number(r.totalSales),
+        totalReturns:         Number(r.totalReturns),
+        netSales,
+        invoiceCount:         Number(r.invoiceCount),
+        avgInvoice:           Number(r.avgInvoice),
+        totalDiscounts:       Number(r.totalDiscounts),
+        totalTax:             Number(r.totalTax),
+        cogs:                 Number(r.cogs),
+        grossMargin,
+        grossMarginPct:       netSales > 0 ? Math.round((grossMargin / netSales) * 1000) / 10 : 0,
+      };
+      if (granularity === 'monthly') {
+        const [y, m] = r.period.split('-').map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        base.year        = y;
+        base.monthNumber = m;
+        base.monthStart  = `${r.period}-01`;
+        base.monthEnd    = `${r.period}-${String(lastDay).padStart(2, '0')}`;
+      } else if (granularity === 'weekly') {
+        // period format: "2025-W22" — derive start/end from ISO week
+        const [isoYear, weekPart] = r.period.split('-W');
+        const wn = parseInt(weekPart, 10);
+        const yr = parseInt(isoYear, 10);
+        // ISO week 1 = week containing first Thursday; Monday = day 1
+        const jan4 = new Date(yr, 0, 4);
+        const startOfW1 = new Date(jan4);
+        startOfW1.setDate(jan4.getDate() - ((jan4.getDay() + 6) % 7));
+        const weekStart = new Date(startOfW1);
+        weekStart.setDate(startOfW1.getDate() + (wn - 1) * 7);
+        const weekEnd   = new Date(weekStart);
+        weekEnd.setDate(weekStart.getDate() + 6);
+        base.year       = yr;
+        base.weekNumber = wn;
+        base.weekStart  = weekStart.toISOString().split('T')[0];
+        base.weekEnd    = weekEnd.toISOString().split('T')[0];
+      }
+      return base;
+    });
+  }
+
+  // ─── Sales by Product ─────────────────────────────────────────────────────
+
+  async getSalesByProduct(
+    tenantId: string,
+    params: {
+      dateFrom: string;
+      dateTo: string;
+      search?: string;
+      category?: string;
+    },
+  ): Promise<ProductSalesRow[]> {
+    const { dateFrom, dateTo, search, category } = params;
+
+    const dateToExclusive = new Date(dateTo);
+    dateToExclusive.setDate(dateToExclusive.getDate() + 1);
+    const dateToStr = dateToExclusive.toISOString().split('T')[0];
+
+    const bindings: any[] = [tenantId, dateFrom, dateToStr];
+    let extraWhere = '';
+
+    if (category) {
+      bindings.push(category);
+      extraWhere += ` AND p.category = $${bindings.length}`;
+    }
+    if (search) {
+      bindings.push(`%${search}%`);
+      extraWhere += ` AND (COALESCE(p.sku, '') ILIKE $${bindings.length} OR COALESCE(p.name, '') ILIKE $${bindings.length} OR ti."productName" ILIKE $${bindings.length})`;
+    }
+
+    const rows: any[] = await this.dataSource.query(`
+      SELECT
+        COALESCE(p.sku, '')                               AS "productCode",
+        COALESCE(p.name, ti."productName", '')            AS "productName",
+        COALESCE(p.category, '')                          AS "category",
+        TO_CHAR(DATE(tx."createdAt"), 'YYYY-MM-DD')       AS "saleDate",
+        SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::int
+                                                          AS "qtySold",
+        ROUND(
+          SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::numeric /
+          NULLIF(COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END), 0),
+          4
+        )                                                 AS "avgQtyPerInvoice",
+        COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END)::int
+                                                          AS "invoiceCount",
+        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti."discountAmount" ELSE 0 END)::numeric, 2)
+                                                          AS "totalDiscounts",
+        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END)::numeric, 2)
+                                                          AS "totalSales",
+        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN (ti."unitPrice" * ti.quantity) ELSE 0 END)::numeric, 2)
+                                                          AS "salesBeforeDiscount",
+        ROUND(SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END)::numeric, 2)
+                                                          AS "totalReturns",
+        ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
+               SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END))::numeric, 2)
+                                                          AS "netSales",
+        0::numeric                                        AS "totalTax",
+        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END)::numeric, 2)
+                                                          AS "cogs",
+        ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
+               SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END))::numeric, 2)
+                                                          AS "grossMargin"
+      FROM pos_transaction_items ti
+      JOIN pos_transactions tx         ON tx.id  = ti."transactionId"
+      LEFT JOIN products p             ON p.id   = ti."productId"
+      LEFT JOIN inventory_items inv    ON inv.id = ti."inventoryItemId"
+      WHERE tx."pharmacyTenantId" = $1
+        AND tx.status = 'completed'
+        AND tx."createdAt" >= $2::date
+        AND tx."createdAt" < $3::date
+        ${extraWhere}
+      GROUP BY ti."productId", p.id, p.sku, p.name, p.category, DATE(tx."createdAt")
+      ORDER BY DATE(tx."createdAt") DESC, "netSales" DESC
+    `, bindings);
+    console.log('[SalesByProduct] tenantId=%s dateFrom=%s dateTo=%s rows=%d', tenantId, dateFrom, dateToStr, rows.length);
+
+    return rows.map(r => ({
+      productCode:         r.productCode        ?? '',
+      productName:         r.productName        ?? '',
+      category:            r.category           ?? '',
+      saleDate:            r.saleDate,
+      qtySold:             Number(r.qtySold),
+      avgQtyPerInvoice:    Number(r.avgQtyPerInvoice),
+      invoiceCount:        Number(r.invoiceCount),
+      totalDiscounts:      Number(r.totalDiscounts),
+      totalSales:          Number(r.totalSales),
+      salesBeforeDiscount: Number(r.salesBeforeDiscount),
+      totalReturns:        Number(r.totalReturns),
+      netSales:            Number(r.netSales),
+      totalTax:            0,
+      cogs:                Number(r.cogs),
+      grossMargin:         Number(r.grossMargin),
+      grossMarginPct:      Number(r.netSales) > 0
+        ? Math.round((Number(r.grossMargin) / Number(r.netSales)) * 1000) / 10
+        : 0,
+    }));
+  }
+
+  // ─── Sales-by-Product Diagnostic ─────────────────────────────────────────
+
+  async diagSalesByProduct(tenantId: string): Promise<any> {
+    const [txCount] = await this.dataSource.query(
+      `SELECT COUNT(*) AS total FROM pos_transactions WHERE "pharmacyTenantId" = $1 AND status = 'completed'`,
+      [tenantId],
+    );
+    const [tiCount] = await this.dataSource.query(
+      `SELECT COUNT(*) AS total FROM pos_transaction_items ti
+       JOIN pos_transactions tx ON tx.id = ti."transactionId"
+       WHERE tx."pharmacyTenantId" = $1`,
+      [tenantId],
+    );
+    const [matchedProducts] = await this.dataSource.query(
+      `SELECT COUNT(*) AS total FROM pos_transaction_items ti
+       JOIN pos_transactions tx ON tx.id = ti."transactionId"
+       JOIN products p ON p.id = ti."productId"
+       WHERE tx."pharmacyTenantId" = $1`,
+      [tenantId],
+    );
+    const [dateRange] = await this.dataSource.query(
+      `SELECT MIN("createdAt") AS oldest, MAX("createdAt") AS newest
+       FROM pos_transactions WHERE "pharmacyTenantId" = $1 AND status = 'completed'`,
+      [tenantId],
+    );
+    return { txCount: txCount.total, tiCount: tiCount.total, matchedProducts: matchedProducts.total, dateRange };
+  }
+
   // ─── Pharmacy Dashboard Analytics ─────────────────────────────────────────
 
   async getWeeklySnapshots(tenantId: string, weeks = 12): Promise<WeeklyAnalyticsSnapshot[]> {
@@ -234,5 +590,310 @@ export class AnalyticsReadService {
       .orderBy('s.weekStart', 'DESC')
       .take(weeks)
       .getMany();
+  }
+
+  // ─── Current Inventory Report ─────────────────────────────────────────────
+
+  async getInventoryReport(
+    tenantId: string,
+    params: { search?: string; category?: string; status?: string },
+  ): Promise<InventoryReportRow[]> {
+    const { search, category, status } = params;
+
+    const bindings: any[] = [tenantId];
+    let extraWhere = '';
+
+    if (category) {
+      bindings.push(category);
+      extraWhere += ` AND p.category = $${bindings.length}`;
+    }
+    if (search) {
+      bindings.push(`%${search}%`);
+      extraWhere += ` AND (COALESCE(p.sku, '') ILIKE $${bindings.length} OR COALESCE(p.name, '') ILIKE $${bindings.length} OR COALESCE(p.barcode, '') ILIKE $${bindings.length})`;
+    }
+
+    const rows: any[] = await this.dataSource.query(`
+      WITH discount_stats AS (
+        SELECT
+          ti."productId",
+          AVG(CASE WHEN ti."unitPrice" * ti.quantity > 0
+            THEN (ti."discountAmount" / (ti."unitPrice" * ti.quantity)) * 100
+            ELSE 0 END)                                    AS "avgDiscount",
+          MIN(CASE WHEN ti."unitPrice" * ti.quantity > 0
+            THEN (ti."discountAmount" / (ti."unitPrice" * ti.quantity)) * 100
+            ELSE 0 END)                                    AS "minDiscount",
+          MAX(CASE WHEN ti."unitPrice" * ti.quantity > 0
+            THEN (ti."discountAmount" / (ti."unitPrice" * ti.quantity)) * 100
+            ELSE 0 END)                                    AS "maxDiscount"
+        FROM pos_transaction_items ti
+        JOIN pos_transactions tx ON tx.id = ti."transactionId"
+        WHERE tx."pharmacyTenantId" = $1
+          AND tx.status  = 'completed'
+          AND tx.type    = 'sale'
+          AND tx."createdAt" >= CURRENT_DATE - INTERVAL '90 days'
+        GROUP BY ti."productId"
+      )
+      SELECT
+        COALESCE(p.sku, '')          AS "productCode",
+        COALESCE(p.name, '')         AS "productName",
+        COALESCE(p.barcode, '')      AS "barcode",
+        COALESCE(p.category, '')     AS "category",
+        SUM(i.quantity)::int     AS "stockQty",
+        ROUND(SUM(i.quantity * COALESCE(i."costPrice",    0))::numeric, 2) AS "costValue",
+        ROUND(SUM(i.quantity * COALESCE(i."sellingPrice", 0))::numeric, 2) AS "sellValue",
+        SUM(CASE
+          WHEN i."expiryDate" IS NULL OR i."expiryDate" > CURRENT_DATE + 90
+          THEN i.quantity ELSE 0
+        END)::int AS "availableForSale",
+        SUM(CASE
+          WHEN i."expiryDate" IS NOT NULL
+            AND i."expiryDate" > CURRENT_DATE
+            AND i."expiryDate" <= CURRENT_DATE + 90
+          THEN i.quantity ELSE 0
+        END)::int AS "nearExpiryQty",
+        SUM(CASE
+          WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE
+          THEN i.quantity ELSE 0
+        END)::int AS "expiredQty",
+        ROUND(AVG(COALESCE(i."costPrice",    0))::numeric, 2) AS "avgCostPrice",
+        ROUND(AVG(COALESCE(i."sellingPrice", 0))::numeric, 2) AS "avgSellPrice",
+        CASE
+          WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE THEN 1 ELSE 0 END) > 0
+            THEN 'expired'
+          WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" > CURRENT_DATE AND i."expiryDate" <= CURRENT_DATE + 90 THEN 1 ELSE 0 END) > 0
+            THEN 'near_expiry'
+          WHEN SUM(i.quantity) <= MIN(i."minThreshold")
+            THEN 'low_stock'
+          ELSE 'active'
+        END AS "status",
+        ROUND(COALESCE(MAX(d."avgDiscount"), 0)::numeric, 2) AS "avgDiscount",
+        ROUND(COALESCE(MAX(d."minDiscount"), 0)::numeric, 2) AS "minDiscount",
+        ROUND(COALESCE(MAX(d."maxDiscount"), 0)::numeric, 2) AS "maxDiscount",
+        0::numeric AS "avgFreeUnits",
+        0::numeric AS "minFreeUnits",
+        0::numeric AS "maxFreeUnits",
+        ROUND(AVG(COALESCE(i."sellingPrice", 0) - COALESCE(i."costPrice", 0))::numeric, 2) AS "avgProfitPerUnit"
+      FROM inventory_items i
+      LEFT JOIN products p         ON p.id = i."productId"
+      LEFT JOIN discount_stats d   ON d."productId" = i."productId"
+      WHERE i."pharmacyTenantId" = $1
+        AND i."deletedAt" IS NULL
+        ${extraWhere}
+      GROUP BY i."productId", p.id, p.sku, p.name, p.barcode, p.category
+      ORDER BY SUM(i.quantity * COALESCE(i."sellingPrice", 0)) DESC
+    `, bindings);
+    console.log('[InventoryReport] tenantId=%s rows=%d', tenantId, rows.length);
+
+    const result: InventoryReportRow[] = rows.map(r => ({
+      productCode:      r.productCode,
+      productName:      r.productName,
+      barcode:          r.barcode,
+      category:         r.category,
+      stockQty:         Number(r.stockQty),
+      costValue:        Number(r.costValue),
+      sellValue:        Number(r.sellValue),
+      availableForSale: Number(r.availableForSale),
+      nearExpiryQty:    Number(r.nearExpiryQty),
+      expiredQty:       Number(r.expiredQty),
+      avgCostPrice:     Number(r.avgCostPrice),
+      avgSellPrice:     Number(r.avgSellPrice),
+      status:           r.status as InventoryReportRow['status'],
+      avgDiscount:      Number(r.avgDiscount),
+      minDiscount:      Number(r.minDiscount),
+      maxDiscount:      Number(r.maxDiscount),
+      avgFreeUnits:     0,
+      minFreeUnits:     0,
+      maxFreeUnits:     0,
+      avgProfitPerUnit: Number(r.avgProfitPerUnit),
+    }));
+
+    if (status) {
+      return result.filter(r => r.status === status);
+    }
+    return result;
+  }
+
+  // ─── Expiry Report ────────────────────────────────────────────────────────
+
+  async getExpiryReport(
+    tenantId: string,
+    params: { search?: string; category?: string; status?: string; daysAhead?: number; dateFrom?: string; dateTo?: string },
+  ): Promise<ExpiryReportRow[]> {
+    const { search, category, status, daysAhead, dateFrom, dateTo } = params;
+
+    const bindings: any[] = [tenantId];
+    let extraWhere = '';
+
+    if (category) {
+      bindings.push(category);
+      extraWhere += ` AND COALESCE(p.category, '') = $${bindings.length}`;
+    }
+    if (search) {
+      bindings.push(`%${search}%`);
+      extraWhere += ` AND (COALESCE(p.sku, '') ILIKE $${bindings.length} OR COALESCE(p.name, '') ILIKE $${bindings.length} OR COALESCE(p.barcode, '') ILIKE $${bindings.length} OR COALESCE(i."batchNumber", '') ILIKE $${bindings.length})`;
+    }
+    if (dateFrom) {
+      bindings.push(dateFrom);
+      extraWhere += ` AND i."expiryDate" >= $${bindings.length}::date`;
+    }
+    if (dateTo) {
+      bindings.push(dateTo);
+      extraWhere += ` AND i."expiryDate" <= $${bindings.length}::date`;
+    }
+    if (!dateFrom && !dateTo && daysAhead !== undefined && daysAhead >= 0) {
+      bindings.push(daysAhead);
+      extraWhere += ` AND i."expiryDate" <= CURRENT_DATE + ($${bindings.length} || ' days')::interval`;
+    }
+
+    // status filter: 'expired' | 'near_expiry' (≤90 days) | 'active' (>90 days)
+    if (status === 'expired') {
+      extraWhere += ` AND i."expiryDate" <= CURRENT_DATE`;
+    } else if (status === 'near_expiry') {
+      extraWhere += ` AND i."expiryDate" > CURRENT_DATE AND i."expiryDate" <= CURRENT_DATE + INTERVAL '90 days'`;
+    } else if (status === 'active') {
+      extraWhere += ` AND (i."expiryDate" IS NULL OR i."expiryDate" > CURRENT_DATE + INTERVAL '90 days')`;
+    }
+
+    const rows: any[] = await this.dataSource.query(`
+      SELECT
+        i.id                                          AS "inventoryItemId",
+        COALESCE(p.sku, '')                           AS "productCode",
+        COALESCE(p.name, '')                          AS "productName",
+        COALESCE(p.barcode, '')                       AS "barcode",
+        COALESCE(i."batchNumber", '')                 AS "batchNumber",
+        TO_CHAR(i."expiryDate", 'YYYY-MM-DD')         AS "expiryDate",
+        (i."expiryDate"::date - CURRENT_DATE)::int    AS "daysUntilExpiry",
+        i.quantity                                    AS "quantity",
+        ROUND(COALESCE(i."costPrice",    0)::numeric, 4) AS "costPrice",
+        ROUND(COALESCE(i."sellingPrice", 0)::numeric, 4) AS "sellingPrice",
+        ROUND((i.quantity * COALESCE(i."costPrice", 0))::numeric, 2) AS "costValue",
+        COALESCE(p.category, '')                      AS "category"
+      FROM inventory_items i
+      LEFT JOIN products p ON p.id = i."productId"
+      WHERE i."pharmacyTenantId" = $1
+        AND i."deletedAt" IS NULL
+        AND i."expiryDate" IS NOT NULL
+        ${extraWhere}
+      ORDER BY i."expiryDate" ASC, i.quantity DESC
+    `, bindings);
+
+    console.log('[ExpiryReport] tenantId=%s rows=%d', tenantId, rows.length);
+
+    return rows.map(r => ({
+      inventoryItemId: r.inventoryItemId,
+      productCode:     r.productCode,
+      productName:     r.productName,
+      barcode:         r.barcode,
+      batchNumber:     r.batchNumber,
+      expiryDate:      r.expiryDate ?? '',
+      daysUntilExpiry: Number(r.daysUntilExpiry ?? 0),
+      quantity:        Number(r.quantity),
+      costPrice:       Number(r.costPrice),
+      sellingPrice:    Number(r.sellingPrice),
+      costValue:       Number(r.costValue),
+      category:        r.category,
+    }));
+  }
+
+  // ─── Data Diagnostic ─────────────────────────────────────────────────────
+
+  async getDataDiag(tenantId: string): Promise<any> {
+    const run = (sql: string, p: any[] = []) => this.dataSource.query(sql, p).then((r: any[]) => r[0]);
+
+    const [tx, ti, inv, invExpiry, cust, txRange] = await Promise.all([
+      run(`SELECT COUNT(*)::int AS count FROM pos_transactions WHERE "pharmacyTenantId" = $1 AND status = 'completed'`, [tenantId]),
+      run(`SELECT COUNT(*)::int AS count FROM pos_transaction_items ti JOIN pos_transactions tx ON tx.id = ti."transactionId" WHERE tx."pharmacyTenantId" = $1`, [tenantId]),
+      run(`SELECT COUNT(*)::int AS count FROM inventory_items WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL`, [tenantId]),
+      run(`SELECT COUNT(*)::int AS count FROM inventory_items WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL AND "expiryDate" IS NOT NULL`, [tenantId]),
+      run(`SELECT COUNT(*)::int AS count FROM pos_customers WHERE "pharmacyTenantId" = $1 AND "insuranceCompanyId" IS NOT NULL AND "deletedAt" IS NULL`, [tenantId]),
+      run(`SELECT MIN("createdAt")::date AS oldest, MAX("createdAt")::date AS newest FROM pos_transactions WHERE "pharmacyTenantId" = $1 AND status = 'completed'`, [tenantId]),
+    ]);
+
+    return {
+      tenantId,
+      completedTransactions: tx.count,
+      transactionItems: ti.count,
+      inventoryItems: inv.count,
+      inventoryItemsWithExpiry: invExpiry.count,
+      customersWithInsurance: cust.count,
+      transactionDateRange: { oldest: txRange.oldest, newest: txRange.newest },
+    };
+  }
+
+  // ─── Insurance Claims Report ──────────────────────────────────────────────
+
+  async getInsuranceClaimsReport(
+    tenantId: string,
+    params: { dateFrom?: string; dateTo?: string; insuranceCompanyId?: string },
+  ): Promise<InsuranceClaimsRow[]> {
+    const { dateFrom, dateTo, insuranceCompanyId } = params;
+    const bindings: any[] = [tenantId];
+    let extraWhere = '';
+
+    if (dateFrom) {
+      bindings.push(dateFrom);
+      extraWhere += ` AND tx."createdAt"::date >= $${bindings.length}::date`;
+    }
+    if (dateTo) {
+      bindings.push(dateTo);
+      extraWhere += ` AND tx."createdAt"::date <= $${bindings.length}::date`;
+    }
+    if (insuranceCompanyId) {
+      bindings.push(insuranceCompanyId);
+      extraWhere += ` AND ic.id = $${bindings.length}`;
+    }
+
+    const rows: any[] = await this.dataSource.query(`
+      SELECT
+        TO_CHAR(tx."createdAt"::date, 'YYYY-MM-DD')                       AS "invoiceDate",
+        ic.name                                                             AS "insuranceCompany",
+        ic.id                                                               AS "insuranceCompanyId",
+        COUNT(DISTINCT tx."customerId")::int                               AS "patientCount",
+        COUNT(DISTINCT tx.id)::int                                         AS "invoiceCount",
+        ROUND(SUM(tx."totalAmount")::numeric, 2)                           AS "totalSales",
+        ROUND(SUM(tx."totalAmount" * (
+          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
+        ))::numeric, 2)                                                    AS "insuranceCoveredAmount",
+        ROUND(SUM(tx."totalAmount" * (
+          COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
+        ))::numeric, 2)                                                    AS "patientDueAmount",
+        ROUND(SUM(tx."totalAmount" * (
+          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
+        ))::numeric, 2)                                                    AS "reimbursementAmount",
+        ROUND(SUM(tx."totalAmount" * (
+          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
+        ))::numeric, 2)                                                    AS "pendingAmount"
+      FROM pos_transactions tx
+      JOIN pos_customers c
+        ON c.id = tx."customerId"
+        AND c."pharmacyTenantId" = $1
+        AND c."deletedAt" IS NULL
+        AND c."insuranceCompanyId" IS NOT NULL
+      JOIN insurance_companies ic
+        ON ic.id = c."insuranceCompanyId"
+        AND ic."pharmacyTenantId" = $1
+      WHERE tx."pharmacyTenantId" = $1
+        AND tx.status = 'completed'
+        AND tx.type   = 'sale'
+        AND tx."customerId" IS NOT NULL
+        ${extraWhere}
+      GROUP BY tx."createdAt"::date, ic.id, ic.name
+      ORDER BY tx."createdAt"::date DESC, ic.name ASC
+    `, bindings);
+
+    console.log('[InsuranceClaimsReport] tenantId=%s rows=%d', tenantId, rows.length);
+
+    return rows.map(r => ({
+      invoiceDate:            r.invoiceDate ?? '',
+      insuranceCompany:       r.insuranceCompany ?? '',
+      insuranceCompanyId:     r.insuranceCompanyId,
+      patientCount:           Number(r.patientCount),
+      invoiceCount:           Number(r.invoiceCount),
+      totalSales:             Number(r.totalSales),
+      insuranceCoveredAmount: Number(r.insuranceCoveredAmount),
+      patientDueAmount:       Number(r.patientDueAmount),
+      reimbursementAmount:    Number(r.reimbursementAmount),
+      pendingAmount:          Number(r.pendingAmount),
+    }));
   }
 }

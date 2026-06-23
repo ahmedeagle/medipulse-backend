@@ -22,6 +22,7 @@ import { DynamicAgentRunner } from './governance/dynamic-agent-runner';
 import { AgentDefinition } from '../ai-governance/entities/agent-definition.entity';
 import { RedisModule } from '../common/redis/redis.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
 import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
 
 @Module({
@@ -45,6 +46,7 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     ForecastingModule,
     RedisModule,
     NotificationsModule,
+    PharmacySettingsModule,
   ],
   // Provide inventory services directly — avoids importing InventoryModule which carries HTTP controllers
   providers: [AiService, AiRateLimiter, AiTokenBudget, DynamicAgentRunner, AiGenerationProcessor, InventoryService, ConsumptionAnalyticsService],

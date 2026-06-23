@@ -1,5 +1,5 @@
 import { IsBoolean, IsNumber, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
-import { ReceiptSettings, LabelSettings, InventorySettings, AiAnalysisSettings } from '../entities/pharmacy-settings.entity';
+import { ReceiptSettings, LabelSettings, InventorySettings, AiAnalysisSettings, NotificationSettings } from '../entities/pharmacy-settings.entity';
 
 export class UpsertPharmacySettingsDto {
   @IsOptional() @IsString() language?: string;
@@ -26,6 +26,7 @@ export class UpsertPharmacySettingsDto {
   @IsOptional() @IsObject() labelSettings?: LabelSettings;
   @IsOptional() @IsObject() inventorySettings?: InventorySettings;
   @IsOptional() @IsObject() aiAnalysisSettings?: AiAnalysisSettings;
+  @IsOptional() @IsObject() notificationSettings?: NotificationSettings;
 
   @IsOptional() @IsBoolean() allowInventoryDiscovery?: boolean;
 }

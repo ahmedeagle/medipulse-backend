@@ -9,6 +9,7 @@ import { Role } from '../common/enums/role.enum';
 import { NotificationService } from '../notifications/notification.service';
 import { DashboardService } from './dashboard.service';
 import { CronLockService } from '../common/cron-lock/cron-lock.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 /**
  * Morning Briefing (PRD v2 §14).
@@ -28,6 +29,7 @@ export class BriefingScheduler {
     private readonly dashboard:     DashboardService,
     private readonly notifications: NotificationService,
     private readonly cronLock:      CronLockService,
+    private readonly settingsSvc:   PharmacySettingsService,
   ) {}
 
   @Cron('0 7 * * 1-6', { name: 'ai-morning-briefing' })
@@ -66,20 +68,24 @@ export class BriefingScheduler {
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
 
+    const briefingEnabled = await this.settingsSvc.getNotifFlag(tenantId, 'enableMorningBriefing');
+
     for (const u of recipients) {
       const alreadySent = await this.notifications.findRecentByTypeForUser(
         tenantId, u.id, 'morning_briefing', todayStart,
       );
       if (alreadySent) continue;
 
-      await this.notifications.create({
-        tenantId,
-        userId:      u.id,
-        type:        'morning_briefing',
-        title,
-        body,
-        resourceRef: '/pharmacy/ai-center',
-      });
+      if (briefingEnabled) {
+        await this.notifications.create({
+          tenantId,
+          userId:      u.id,
+          type:        'morning_briefing',
+          title,
+          body,
+          resourceRef: '/pharmacy/ai-center',
+        });
+      }
     }
   }
 }

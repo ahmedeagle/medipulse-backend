@@ -97,13 +97,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     return {
-      id:             payload.sub,
-      email:          payload.email,
-      firstName:      payload.given_name  ?? '',
-      lastName:       payload.family_name ?? '',
+      id:               payload.sub,
+      sub:              payload.sub,
+      email:            payload.email,
+      firstName:        payload.given_name  ?? '',
+      lastName:         payload.family_name ?? '',
       role,
       tenantId,
-      organizationId: payload.organizationId ?? null,
+      pharmacyTenantId: tenantId,   // alias used by purchases + inventory controllers
+      organizationId:   payload.organizationId ?? null,
     };
   }
 

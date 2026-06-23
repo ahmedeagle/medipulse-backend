@@ -43,6 +43,115 @@ export class AnalyticsController {
     return this.svc.getWeeklySnapshots(user.tenantId, Math.min(weeks, 52));
   }
 
+  @Get('diag')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Diagnostic: counts from all report-relevant tables' })
+  getDiag(@CurrentUser() user: any) {
+    return this.svc.getDataDiag(user.tenantId);
+  }
+
+  @Get('sales/summary')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('sales_summary_report')
+  @ApiOperation({ summary: 'Aggregated daily, weekly, or monthly sales summary with COGS and margin' })
+  @ApiQuery({ name: 'granularity',  required: false, enum: ['daily', 'weekly', 'monthly'], schema: { default: 'daily' } })
+  @ApiQuery({ name: 'dateFrom',     required: true,  description: 'ISO date YYYY-MM-DD' })
+  @ApiQuery({ name: 'dateTo',       required: true,  description: 'ISO date YYYY-MM-DD (inclusive)' })
+  @ApiQuery({ name: 'cashierName',  required: false, description: 'Filter by cashier name (partial, case-insensitive)' })
+  getSalesSummary(
+    @CurrentUser() user: any,
+    @Query('granularity')  granularity:  string = 'daily',
+    @Query('dateFrom')     dateFrom:     string,
+    @Query('dateTo')       dateTo:       string,
+    @Query('cashierName')  cashierName?: string,
+  ) {
+    const g = granularity === 'monthly' ? 'monthly' : granularity === 'weekly' ? 'weekly' : 'daily';
+    return this.svc.getSalesSummary(user.tenantId, { granularity: g, dateFrom, dateTo, cashierName });
+  }
+
+  @Get('sales/by-product')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('sales_by_product_report')
+  @ApiOperation({ summary: 'Sales breakdown by product per day with COGS and margin' })
+  @ApiQuery({ name: 'dateFrom',  required: true })
+  @ApiQuery({ name: 'dateTo',    required: true })
+  @ApiQuery({ name: 'search',    required: false })
+  @ApiQuery({ name: 'category',  required: false })
+  getSalesByProduct(
+    @CurrentUser() user: any,
+    @Query('dateFrom')  dateFrom:  string,
+    @Query('dateTo')    dateTo:    string,
+    @Query('search')    search?:   string,
+    @Query('category')  category?: string,
+  ) {
+    return this.svc.getSalesByProduct(user.tenantId, { dateFrom, dateTo, search, category });
+  }
+
+  @Get('sales/diag')
+  @Roles(Role.PHARMACY_ADMIN)
+  diagSalesByProduct(@CurrentUser() user: any) {
+    return this.svc.diagSalesByProduct(user.tenantId);
+  }
+
+  @Get('inventory/current')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('inventory_report')
+  @ApiOperation({ summary: 'Current inventory snapshot with cost/sell values, expiry status and discount stats' })
+  @ApiQuery({ name: 'search',   required: false })
+  @ApiQuery({ name: 'category', required: false })
+  @ApiQuery({ name: 'status',   required: false, enum: ['active', 'near_expiry', 'expired', 'low_stock'] })
+  getInventoryReport(
+    @CurrentUser() user: any,
+    @Query('search')   search?:   string,
+    @Query('category') category?: string,
+    @Query('status')   status?:   string,
+  ) {
+    return this.svc.getInventoryReport(user.tenantId, { search, category, status });
+  }
+
+  @Get('expiry/report')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('expiry_report')
+  @ApiOperation({ summary: 'Per-batch expiry report sorted ascending by expiry date' })
+  @ApiQuery({ name: 'search',    required: false })
+  @ApiQuery({ name: 'category',  required: false })
+  @ApiQuery({ name: 'status',    required: false, enum: ['expired', 'near_expiry', 'active'] })
+  @ApiQuery({ name: 'daysAhead', required: false })
+  @ApiQuery({ name: 'dateFrom',  required: false, description: 'Expiry date from (YYYY-MM-DD)' })
+  @ApiQuery({ name: 'dateTo',    required: false, description: 'Expiry date to (YYYY-MM-DD)' })
+  getExpiryReport(
+    @CurrentUser() user: any,
+    @Query('search')    search?:    string,
+    @Query('category')  category?:  string,
+    @Query('status')    status?:    string,
+    @Query('daysAhead') daysAhead?: string,
+    @Query('dateFrom')  dateFrom?:  string,
+    @Query('dateTo')    dateTo?:    string,
+  ) {
+    return this.svc.getExpiryReport(user.tenantId, {
+      search, category, status, dateFrom, dateTo,
+      daysAhead: daysAhead !== undefined ? Number(daysAhead) : undefined,
+    });
+  }
+
+  @Get('insurance/claims')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('insurance_claims_report')
+  @ApiOperation({ summary: 'Insurance claims summary grouped by date and company' })
+  @ApiQuery({ name: 'dateFrom',           required: false })
+  @ApiQuery({ name: 'dateTo',             required: false })
+  @ApiQuery({ name: 'insuranceCompanyId', required: false })
+  getInsuranceClaimsReport(
+    @CurrentUser() user: any,
+    @Query('dateFrom')           dateFrom?:           string,
+    @Query('dateTo')             dateTo?:             string,
+    @Query('insuranceCompanyId') insuranceCompanyId?: string,
+  ) {
+    return this.svc.getInsuranceClaimsReport(user.tenantId, {
+      dateFrom, dateTo, insuranceCompanyId,
+    });
+  }
+
   @Get('pricing/regional')
   @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN, Role.CHAIN_ADMIN, Role.SYSTEM_ADMIN)
   @AuditRead('regional_pricing')

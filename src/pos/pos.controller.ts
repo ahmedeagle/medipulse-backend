@@ -194,6 +194,11 @@ export class PosController {
     return this.pos.searchProducts(tenantId(req), q);
   }
 
+  @Get('products/:inventoryItemId/substitutes')
+  getSubstitutes(@Request() req: any, @Param('inventoryItemId') inventoryItemId: string) {
+    return this.pos.getSubstitutes(tenantId(req), inventoryItemId);
+  }
+
   // ── Insurance Companies ───────────────────────────────────────────────────
 
   @Post('insurance-companies')

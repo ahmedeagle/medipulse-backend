@@ -69,7 +69,7 @@ export class ExpiryNotificationCron {
     for (const row of rows) {
       // Respect this tenant's configured expiryAlertDays — skip if total is 0 after filtering
       const tenantSettings = await this.pharmacySettingsService.getSettings(row.tenantId);
-      if (tenantSettings.aiAnalysisSettings?.enableExpiryProtection === false) continue;
+      if (!await this.pharmacySettingsService.getNotifFlag(row.tenantId, 'enableExpiryAlerts')) continue;
       const alertDays = tenantSettings.inventorySettings?.expiryAlertDays ?? 90;
       const alertCutoff = this.daysFromNow(alertDays);
 
@@ -144,7 +144,7 @@ export class ExpiryNotificationCron {
 
     for (const [tenantId, tenantItems] of byTenant) {
       const settings = await this.pharmacySettingsService.getSettings(tenantId);
-      if (settings.aiAnalysisSettings?.enableExpiryProtection === false) continue;
+      if (!await this.pharmacySettingsService.getNotifFlag(tenantId, 'enableExpiryAlerts')) continue;
       const alertDays = settings.inventorySettings?.expiryAlertDays ?? 90;
       const alertCutoff = Date.now() + alertDays * 86_400_000;
 

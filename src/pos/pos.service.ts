@@ -4,14 +4,31 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, SelectQueryBuilder } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PosShift }              from './entities/pos-shift.entity';
 import { PosTransaction }        from './entities/pos-transaction.entity';
 import { PosTransactionItem }    from './entities/pos-transaction-item.entity';
 import { PosCashMovement }       from './entities/pos-cash-movement.entity';
 import { PosCustomer }           from './entities/pos-customer.entity';
 import { PosInsuranceCompany }   from './entities/pos-insurance-company.entity';
+import { EVENTS }                from '../events/domain-events';
 
 // ── DTOs (inline — small enough) ─────────────────────────────────────────────
+
+export interface SubstituteResult {
+  inventoryItemId: string;
+  productId:       string;
+  name:            string;
+  nameEn:          string;
+  manufacturer:    string | null;
+  sellingPrice:    number | null;
+  costPrice:       number | null;
+  quantity:        number;
+  expiryDate:      string | null;
+  marginDelta:     number | null;  // positive = this option earns more per unit
+  customerSaving:  number | null;  // positive = cheaper for customer
+  reason:          'higher_margin' | 'customer_saving' | 'available';
+}
 
 export interface OpenShiftDto {
   openingBalance: number;
@@ -85,6 +102,7 @@ export class PosService {
     @InjectRepository(PosInsuranceCompany)
     private readonly insuranceRepo: Repository<PosInsuranceCompany>,
     private readonly dataSource: DataSource,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ── Shifts ────────────────────────────────────────────────────────────────
@@ -241,6 +259,11 @@ export class PosService {
       await qr.manager.save(PosTransactionItem, items);
 
       // Deduct / restore inventory
+      const lowStockEvents: Array<{
+        tenantId: string; inventoryItemId: string; productId: string;
+        productNameAr: string; quantity: number; minThreshold: number;
+      }> = [];
+
       for (const item of dto.items) {
         if (!item.inventoryItemId) continue;
         if (dto.type === 'sale') {
@@ -255,6 +278,27 @@ export class PosService {
             throw new BadRequestException(
               `Insufficient stock for "${item.productName ?? item.inventoryItemId}". Reduce quantity or check inventory.`,
             );
+          }
+          // Check if quantity crossed below minThreshold after this sale
+          const [newState]: Array<{
+            quantity: number; minThreshold: number; productId: string; productNameAr: string;
+          }> = await qr.manager.query(
+            `SELECT i.quantity, i."minThreshold", i."productId",
+               COALESCE(p."nameAr", p.name, 'منتج') AS "productNameAr"
+             FROM inventory_items i
+             LEFT JOIN products p ON p.id = i."productId"
+             WHERE i.id = $1`,
+            [item.inventoryItemId],
+          );
+          if (newState && newState.minThreshold > 0 && newState.quantity <= newState.minThreshold) {
+            lowStockEvents.push({
+              tenantId,
+              inventoryItemId: item.inventoryItemId,
+              productId:       newState.productId,
+              productNameAr:   newState.productNameAr,
+              quantity:        newState.quantity,
+              minThreshold:    newState.minThreshold,
+            });
           }
         } else {
           // Return: always restore — no negative-guard needed
@@ -302,6 +346,13 @@ export class PosService {
 
       await qr.commitTransaction();
       this.logger.log(`POS tx ${tx.id}: ${dto.type} EGP ${total} by user ${userId}`);
+
+      // Emit low-stock events after commit — LowStockCron handles dedup + task creation
+      for (const ev of lowStockEvents) {
+        this.eventEmitter.emit(EVENTS.INVENTORY_LOW_STOCK_DETECTED, ev);
+        this.logger.log(`POS: low-stock event emitted for "${ev.productNameAr}" (qty ${ev.quantity}/${ev.minThreshold})`);
+      }
+
       return { ...tx, items: items as any };
     } catch (err) {
       await qr.rollbackTransaction();
@@ -568,6 +619,105 @@ export class PosService {
        LIMIT 30`,
       [tenantId, `%${q}%`, q],
     );
+  }
+
+  // ── Smart Substitution ───────────────────────────────────────────────────
+
+  async getSubstitutes(tenantId: string, inventoryItemId: string): Promise<SubstituteResult[]> {
+    // Step 1: load the target item's product profile
+    const [target] = await this.dataSource.query<any[]>(`
+      SELECT
+        p."activeIngredient",
+        p."atcCode",
+        p.strength,
+        p."dosageForm",
+        p.id                AS "productId",
+        i."costPrice"       AS "targetCost",
+        i."sellingPrice"    AS "targetSell"
+      FROM inventory_items i
+      JOIN products p ON p.id = i."productId"
+      WHERE i.id = $1
+        AND i."pharmacyTenantId" = $2
+        AND i."deletedAt" IS NULL
+    `, [inventoryItemId, tenantId]);
+
+    if (!target?.activeIngredient) return [];
+
+    const targetSell = target.targetSell ? Number(target.targetSell) : null;
+    const targetCost = target.targetCost ? Number(target.targetCost) : null;
+    const targetMargin = (targetSell && targetCost) ? (targetSell - targetCost) : null;
+
+    // Step 2: find alternatives — same molecule + strength + dosage form, in stock
+    const rows = await this.dataSource.query<any[]>(`
+      SELECT
+        i.id                          AS "inventoryItemId",
+        p.id                          AS "productId",
+        COALESCE(p."nameAr", p.name)  AS name,
+        p.name                        AS "nameEn",
+        p.manufacturer,
+        i."sellingPrice",
+        i."costPrice",
+        i.quantity,
+        i."expiryDate"
+      FROM inventory_items i
+      JOIN products p ON p.id = i."productId"
+      WHERE i."pharmacyTenantId" = $1
+        AND i."deletedAt" IS NULL
+        AND i.quantity > 0
+        AND i.id  != $2
+        AND p.id  != $3
+        AND (
+          (
+            p."activeIngredient" IS NOT NULL
+            AND LOWER(p."activeIngredient") = LOWER($4)
+            AND LOWER(COALESCE(p.strength, ''))    = LOWER(COALESCE($5, ''))
+            AND LOWER(COALESCE(p."dosageForm", '')) = LOWER(COALESCE($6, ''))
+          )
+          OR
+          (
+            p."atcCode" IS NOT NULL AND p."atcCode" = $7
+            AND LOWER(COALESCE(p.strength, '')) = LOWER(COALESCE($5, ''))
+          )
+        )
+      ORDER BY i."sellingPrice" NULLS LAST
+      LIMIT 3
+    `, [
+      tenantId,
+      inventoryItemId,
+      target.productId,
+      target.activeIngredient,
+      target.strength,
+      target.dosageForm,
+      target.atcCode,
+    ]);
+
+    return rows.map(r => {
+      const sell  = r.sellingPrice ? Number(r.sellingPrice) : null;
+      const cost  = r.costPrice    ? Number(r.costPrice)    : null;
+      const margin = (sell && cost) ? (sell - cost) : null;
+
+      const marginDelta    = (margin !== null && targetMargin !== null) ? margin - targetMargin : null;
+      const customerSaving = (sell !== null && targetSell !== null)     ? targetSell - sell      : null;
+
+      let reason: SubstituteResult['reason'] = 'available';
+      if (marginDelta !== null && marginDelta > 0)    reason = 'higher_margin';
+      else if (customerSaving !== null && customerSaving > 0) reason = 'customer_saving';
+
+      return {
+        inventoryItemId: r.inventoryItemId,
+        productId:       r.productId,
+        name:            r.name,
+        nameEn:          r.nameEn,
+        manufacturer:    r.manufacturer ?? null,
+        sellingPrice:    sell,
+        costPrice:       cost,
+        quantity:        Number(r.quantity),
+        expiryDate:      r.expiryDate ?? null,
+        marginDelta,
+        customerSaving,
+        reason,
+      } satisfies SubstituteResult;
+    });
   }
 
   // ── Insurance Companies ───────────────────────────────────────────────────

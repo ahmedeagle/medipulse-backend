@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 
 import { AiModule }            from '../ai/ai.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
 import { AgentDefinition }     from './entities/agent-definition.entity';
 import { AgentTenantSetting }  from './entities/agent-tenant-setting.entity';
 import { Approval }            from './entities/approval.entity';
@@ -57,6 +58,7 @@ import { DeadStockExecutor }           from './executors/dead-stock.executor';
     CronLockModule,
     AiModule,
     P2pOrdersModule,
+    PharmacySettingsModule,
     TypeOrmModule.forFeature([
       AgentDefinition,
       AgentTenantSetting,

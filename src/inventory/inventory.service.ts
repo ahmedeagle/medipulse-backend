@@ -4,14 +4,18 @@ import {
   ForbiddenException,
   ConflictException,
 } from '@nestjs/common';
+import * as fs from 'fs';
+import * as path from 'path';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { DataSource, Repository, IsNull } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
+import { ProductBatch } from './entities/product-batch.entity';
 import { CreateInventoryItemDto } from './dto/create-inventory-item.dto';
 import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CreateProductWithBatchDto } from './dto/create-product-with-batch.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
 import { NotificationService } from '../notifications/notification.service';
 import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
@@ -31,6 +35,7 @@ export class InventoryService {
     private readonly eventEmitter: EventEmitter2,
     private readonly notificationService: NotificationService,
     private readonly settingsSvc: PharmacySettingsService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async findAll(
@@ -46,9 +51,9 @@ export class InventoryService {
       .andWhere('item.deletedAt IS NULL');
 
     if (q?.trim()) {
-      const like = `%${q.toLowerCase().trim()}%`;
+      const like = `%${q.trim()}%`;
       qb.andWhere(
-        '(LOWER(product.name) LIKE :like OR LOWER(product."nameAr") LIKE :like OR product.barcode LIKE :like OR product.sku LIKE :like OR item."batchNumber" LIKE :like)',
+        '(product.name ILIKE :like OR product."nameAr" ILIKE :like OR product.barcode ILIKE :like OR product.sku ILIKE :like OR item."batchNumber" ILIKE :like)',
         { like },
       );
     }
@@ -279,16 +284,12 @@ export class InventoryService {
     dto: UpdateInventoryItemDto,
   ): Promise<InventoryItem> {
     const item = await this.inventoryItemRepository.findOne({
-      where: { id, deletedAt: IsNull() },
+      where: { id, pharmacyTenantId: tenantId, deletedAt: IsNull() },
       relations: ['product'],
     });
 
     if (!item) {
       throw new NotFoundException(`Inventory item with ID ${id} not found`);
-    }
-
-    if (item.pharmacyTenantId !== tenantId) {
-      throw new ForbiddenException('You do not have access to this inventory item');
     }
 
     if (dto.productId && dto.productId !== item.productId) {
@@ -391,15 +392,11 @@ export class InventoryService {
 
   async remove(tenantId: string, id: string): Promise<{ message: string }> {
     const item = await this.inventoryItemRepository.findOne({
-      where: { id, deletedAt: IsNull() },
+      where: { id, pharmacyTenantId: tenantId, deletedAt: IsNull() },
     });
 
     if (!item) {
       throw new NotFoundException(`Inventory item with ID ${id} not found`);
-    }
-
-    if (item.pharmacyTenantId !== tenantId) {
-      throw new ForbiddenException('You do not have access to this inventory item');
     }
 
     await this.inventoryItemRepository.update(id, { deletedAt: new Date() });
@@ -430,8 +427,229 @@ export class InventoryService {
         });
       }
     }
+    if (!dto.sku?.trim()) {
+      // Atomic: read MAX numeric suffix to handle concurrent creates safely
+      const result = await this.productRepository
+        .createQueryBuilder('p')
+        .select("MAX(CAST(NULLIF(REGEXP_REPLACE(p.sku, '[^0-9]', '', 'g'), '') AS INTEGER))", 'maxSku')
+        .where("p.sku LIKE 'MED-%'")
+        .getRawOne();
+      const next = ((result?.maxSku as number | null) ?? 0) + 1;
+      dto.sku = `MED-${String(next).padStart(6, '0')}`;
+    }
     const product = this.productRepository.create(dto);
     return this.productRepository.save(product);
+  }
+
+  /**
+   * F-07: WHO→Batch one-flow.
+   * Creates product + first batch + inventory item in a single transaction.
+   * If batchNumber / batchQuantity are omitted, falls back to product-only creation.
+   */
+  async createProductWithBatch(
+    tenantId: string,
+    userId: string,
+    dto: CreateProductWithBatchDto,
+  ): Promise<{ product: Product; inventoryItem?: InventoryItem; batch?: ProductBatch }> {
+    // Create product first (SKU generation must be outside transaction to avoid lock contention)
+    const product = await this.createProduct(dto);
+
+    // If no batch fields supplied, return product only
+    if (!dto.batchNumber?.trim() || !dto.batchQuantity || dto.batchQuantity < 1) {
+      return { product };
+    }
+
+    const result = await this.dataSource.transaction(async (manager) => {
+      const itemRepo  = manager.getRepository(InventoryItem);
+      const batchRepo = manager.getRepository(ProductBatch);
+
+      // Create or upsert the inventory item
+      let inventoryItem = await itemRepo.findOne({
+        where: { productId: product.id, pharmacyTenantId: tenantId, deletedAt: IsNull() },
+      });
+
+      if (!inventoryItem) {
+        inventoryItem = itemRepo.create({
+          pharmacyTenantId: tenantId,
+          productId:        product.id,
+          quantity:         0,
+          minThreshold:     dto.minThreshold ?? 10,
+          linkStatus:       'linked',
+          matchScore:       null,
+          matchExplanation: { reasonKey: 'direct_catalog_selection', productId: product.id } as any,
+          lastLinkedAt:     new Date(),
+        });
+        inventoryItem = await itemRepo.save(inventoryItem);
+      }
+
+      // Create the first batch
+      const batch = batchRepo.create({
+        productId:        product.id,
+        pharmacyTenantId: tenantId,
+        inventoryItemId:  inventoryItem.id,
+        batchNumber:      dto.batchNumber!.trim(),
+        quantity:         dto.batchQuantity!,
+        receivedQuantity: dto.batchQuantity!,
+        noExpiry:         dto.noExpiry ?? false,
+        expiryDate:       dto.noExpiry ? null : (dto.expiryDate ? new Date(dto.expiryDate) : null),
+        manufacturingDate: dto.manufacturingDate ? new Date(dto.manufacturingDate) : null,
+        location:         dto.location ?? 'Main Warehouse',
+        costPerUnit:      dto.costPerUnit ?? null,
+        sellingPrice:     dto.sellingPrice ?? null,
+        notes:            dto.batchNotes?.trim() ?? null,
+        createdByUserId:  userId,
+        status:           'active',
+      });
+      await batchRepo.save(batch);
+
+      // Recompute inventory aggregate (FEFO: soonest expiry batch drives top-level fields)
+      const activeBatches = await batchRepo.find({
+        where: { inventoryItemId: inventoryItem.id, status: 'active' },
+        order: { expiryDate: 'ASC' },
+      });
+
+      const totalQty = activeBatches.reduce((s, b) => s + Number(b.quantity), 0);
+      const fefo = activeBatches.find(b => !b.noExpiry && b.expiryDate) ?? activeBatches[0];
+      const weightedCost = activeBatches.length
+        ? activeBatches.reduce((s, b) => s + Number(b.costPerUnit ?? 0) * Number(b.quantity), 0) / Math.max(totalQty, 1)
+        : (dto.costPerUnit ?? 0);
+
+      await itemRepo.update(inventoryItem.id, {
+        quantity:      totalQty,
+        minThreshold:  dto.minThreshold ?? inventoryItem.minThreshold ?? 10,
+        expiryDate:    fefo?.expiryDate ?? null,
+        batchNumber:   fefo?.batchNumber ?? null,
+        costPrice:     weightedCost,
+        sellingPrice:  fefo?.sellingPrice ?? inventoryItem.sellingPrice ?? null,
+      });
+
+      inventoryItem.quantity = totalQty;
+      return { product, inventoryItem, batch };
+    });
+
+    // Emit events after transaction
+    this.eventEmitter.emit(EVENTS.INVENTORY_UPDATED, new InventoryUpdatedEvent(
+      tenantId, product.id, result.inventoryItem!.quantity, 0, 'adjustment',
+    ));
+
+    return result;
+  }
+
+  /**
+   * F-05: Smart product table — returns products with aggregated batch stats.
+   * Single query: LEFT JOIN product_batches aggregates per tenant.
+   * Returns: batchCount, nearestExpiry, totalStock, stockStatus, barcodeWarning.
+   */
+  async findSmartProducts(
+    tenantId: string,
+    opts: { search?: string; status?: string; take?: number; skip?: number },
+  ): Promise<{ data: any[]; total: number }> {
+    const take = Math.min(opts.take ?? 25, 200);
+    const skip = opts.skip ?? 0;
+    const today = new Date().toISOString().slice(0, 10);
+
+    const searchClause = opts.search?.trim()
+      ? `AND (LOWER(p.name) LIKE :q OR LOWER(p."nameAr") LIKE :q OR LOWER(p."activeIngredient") LIKE :q OR p.barcode = :exact OR p.sku = :exact)`
+      : '';
+
+    const havingClause = (() => {
+      switch (opts.status) {
+        case 'out_of_stock':  return `HAVING COALESCE(SUM(b.quantity), 0) = 0`;
+        case 'low_stock':     return `HAVING COALESCE(SUM(b.quantity), 0) > 0 AND COALESCE(SUM(b.quantity), 0) <= MAX(ii."minThreshold")`;
+        case 'in_stock':      return `HAVING COALESCE(SUM(b.quantity), 0) > COALESCE(MAX(ii."minThreshold"), 10)`;
+        case 'expiring_soon': return `HAVING MIN(CASE WHEN b."noExpiry" = false AND b."expiryDate" >= :today THEN b."expiryDate" ELSE NULL END) <= (CURRENT_DATE + INTERVAL '90 days')`;
+        default: return '';
+      }
+    })();
+
+    // Build positional parameter arrays for raw SQL
+    const baseParams: any[] = [tenantId, today];
+    let searchFilter = '';
+    if (opts.search?.trim()) {
+      // Use ILIKE (case-insensitive) instead of LOWER() LIKE — pg_trgm GIN indexes accelerate ILIKE at scale
+      const q = `%${opts.search.trim()}%`;
+      const exact = opts.search.trim();
+      baseParams.push(q, exact);
+      const qi = baseParams.length - 1;
+      searchFilter = `AND (p.name ILIKE $${qi} OR p."nameAr" ILIKE $${qi} OR p."activeIngredient" ILIKE $${qi} OR p.barcode = $${qi + 1} OR p.sku = $${qi + 1})`;
+    }
+
+    const havingSQL = (() => {
+      switch (opts.status) {
+        case 'out_of_stock':  return `HAVING COALESCE(SUM(b.quantity), 0) = 0`;
+        case 'low_stock':     return `HAVING COALESCE(SUM(b.quantity), 0) > 0 AND COALESCE(SUM(b.quantity), 0) <= COALESCE(MAX(ii."minThreshold"), 10)`;
+        case 'in_stock':      return `HAVING COALESCE(SUM(b.quantity), 0) > COALESCE(MAX(ii."minThreshold"), 10)`;
+        case 'expiring_soon': return `HAVING MIN(CASE WHEN b."noExpiry" = false AND b."expiryDate" >= $2::date THEN b."expiryDate" ELSE NULL END) <= (CURRENT_DATE + INTERVAL '90 days')`;
+        default: return '';
+      }
+    })();
+
+    const dataParams = [...baseParams, take, skip];
+    const pTake = dataParams.length - 1;
+    const pSkip = dataParams.length;
+
+    const [dataRows, countRow] = await Promise.all([
+      this.productRepository.manager.query(
+        `
+        SELECT
+          p.id, p.name, p."nameAr", p.sku, p.barcode, p.category, p.unit,
+          p."dosageForm", p.strength, p."activeIngredient", p.manufacturer,
+          p."taxRate", p."isActive", p."disablePOSSale", p."disablePurchase",
+          p."returnable", p."discountAllowed", p."requiresPrescription", p."createdAt", p."imageUrl",
+          COUNT(b.id) FILTER (WHERE b.status = 'active' AND (b."noExpiry" = true OR b."expiryDate" >= $2::date)) AS "batchCount",
+          COALESCE(SUM(b.quantity) FILTER (WHERE b."pharmacyTenantId" = $1 AND b.status = 'active'), 0) AS "totalStock",
+          MIN(b."expiryDate") FILTER (WHERE b."pharmacyTenantId" = $1 AND b.status = 'active' AND b."noExpiry" = false AND b."expiryDate" >= $2::date) AS "nearestExpiry",
+          COALESCE(MAX(ii."minThreshold"), 10) AS "minThreshold"
+        FROM products p
+        LEFT JOIN product_batches b ON b."productId" = p.id AND b."pharmacyTenantId" = $1
+        LEFT JOIN inventory_items ii ON ii."productId" = p.id AND ii."pharmacyTenantId" = $1 AND ii."deletedAt" IS NULL
+        WHERE p."isActive" = true
+          ${searchFilter}
+        GROUP BY p.id
+        ${havingSQL}
+        ORDER BY p.name ASC
+        LIMIT $${pTake} OFFSET $${pSkip}
+        `,
+        dataParams,
+      ),
+      this.productRepository.manager.query(
+        `
+        SELECT COUNT(*) AS total
+        FROM (
+          SELECT p.id
+          FROM products p
+          LEFT JOIN product_batches b ON b."productId" = p.id AND b."pharmacyTenantId" = $1
+          LEFT JOIN inventory_items ii ON ii."productId" = p.id AND ii."pharmacyTenantId" = $1 AND ii."deletedAt" IS NULL
+          WHERE p."isActive" = true
+            ${searchFilter}
+          GROUP BY p.id
+          ${havingSQL}
+        ) sub
+        `,
+        baseParams,
+      ),
+    ]);
+
+    const data = dataRows.map((row: any) => {
+      const totalStock = Number(row.totalStock);
+      const minThreshold = Number(row.minThreshold);
+      let stockStatus: 'in_stock' | 'low_stock' | 'out_of_stock';
+      if (totalStock === 0) stockStatus = 'out_of_stock';
+      else if (totalStock <= minThreshold) stockStatus = 'low_stock';
+      else stockStatus = 'in_stock';
+
+      return {
+        ...row,
+        batchCount:    Number(row.batchCount),
+        totalStock,
+        minThreshold,
+        stockStatus,
+        barcodeWarning: !row.barcode,
+        nearestExpiry: row.nearestExpiry || null,
+      };
+    });
+
+    return { data, total: Number(countRow[0]?.total ?? 0) };
   }
 
   async findAllProducts(search?: string, take = 25, skip = 0): Promise<{ data: Product[]; total: number }> {
@@ -473,12 +691,9 @@ export class InventoryService {
     opts: { score?: number; signals?: string[]; reasons?: string[]; manual?: boolean } = {},
   ): Promise<InventoryItem> {
     const item = await this.inventoryItemRepository.findOne({
-      where: { id: inventoryItemId, deletedAt: IsNull() },
+      where: { id: inventoryItemId, pharmacyTenantId: tenantId, deletedAt: IsNull() },
     });
     if (!item) throw new NotFoundException(`Inventory item ${inventoryItemId} not found`);
-    if (item.pharmacyTenantId !== tenantId) {
-      throw new ForbiddenException('You do not have access to this inventory item');
-    }
 
     const product = await this.productRepository.findOne({ where: { id: productId } });
     if (!product) throw new NotFoundException(`Product ${productId} not found`);
@@ -513,12 +728,9 @@ export class InventoryService {
     reason?: string,
   ): Promise<InventoryItem> {
     const item = await this.inventoryItemRepository.findOne({
-      where: { id: inventoryItemId, deletedAt: IsNull() },
+      where: { id: inventoryItemId, pharmacyTenantId: tenantId, deletedAt: IsNull() },
     });
     if (!item) throw new NotFoundException(`Inventory item ${inventoryItemId} not found`);
-    if (item.pharmacyTenantId !== tenantId) {
-      throw new ForbiddenException('You do not have access to this inventory item');
-    }
 
     await this.inventoryItemRepository.update(inventoryItemId, {
       linkStatus:       'unlinked',
@@ -530,6 +742,44 @@ export class InventoryService {
       where: { id: inventoryItemId },
       relations: ['product'],
     });
+  }
+
+  // ── F-08: Product image ──────────────────────────────────────────────────────
+
+  async saveProductImage(productId: string, file: Express.Multer.File) {
+    const product = await this.productRepository.findOne({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Product not found');
+
+    const uploadDir = path.join(process.cwd(), 'uploads', 'products');
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+    const ext = file.mimetype === 'image/png' ? '.png' : file.mimetype === 'image/webp' ? '.webp' : '.jpg';
+    const filename = `${productId}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+
+    // Remove old file if different extension
+    for (const oldExt of ['.jpg', '.jpeg', '.png', '.webp']) {
+      const old = path.join(uploadDir, `${productId}${oldExt}`);
+      if (old !== filePath && fs.existsSync(old)) fs.unlinkSync(old);
+    }
+
+    fs.writeFileSync(filePath, file.buffer);
+
+    const imageUrl = `/uploads/products/${filename}`;
+    await this.productRepository.update(productId, { imageUrl });
+    return { imageUrl };
+  }
+
+  async removeProductImage(productId: string) {
+    const product = await this.productRepository.findOne({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Product not found');
+
+    if (product.imageUrl) {
+      const filePath = path.join(process.cwd(), product.imageUrl.replace(/^\//, ''));
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      await this.productRepository.update(productId, { imageUrl: null as any });
+    }
+    return { success: true };
   }
 }
 

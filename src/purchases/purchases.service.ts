@@ -1,23 +1,38 @@
 import {
-  Injectable, NotFoundException, BadRequestException,
+  Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   Repository, DataSource, EntityManager, IsNull,
 } from 'typeorm';
+import { Response } from 'express';
+import * as ExcelJS from 'exceljs';
 import { PurchaseInvoice }     from './entities/purchase-invoice.entity';
 import { PurchaseInvoiceLine } from './entities/purchase-invoice-line.entity';
 import { PurchaseReturn }      from './entities/purchase-return.entity';
 import { PurchaseReturnLine }  from './entities/purchase-return-line.entity';
 import { WishListItem }        from './entities/wish-list-item.entity';
 import { PurchasePriceHistory } from './entities/purchase-price-history.entity';
+import { PurchaseInvoiceChangelog, ChangeEntry } from './entities/purchase-invoice-changelog.entity';
 import { CreateInvoiceDto }    from './dto/create-invoice.dto';
 import { UpdateInvoiceDto }    from './dto/update-invoice.dto';
 import { CreateReturnDto }     from './dto/create-return.dto';
 import { InvoiceQueryDto, ReturnQueryDto } from './dto/invoice-query.dto';
 
+const FIELD_LABELS: Record<string, string> = {
+  supplierName:          'اسم المورد',
+  supplierInvoiceNumber: 'رقم فاتورة المورد',
+  invoiceDate:           'تاريخ الفاتورة',
+  paymentMethod:         'طريقة الدفع',
+  notes:                 'الملاحظات',
+  discountType:          'نوع الخصم',
+  discountValue:         'قيمة الخصم',
+};
+
 @Injectable()
 export class PurchasesService {
+  private readonly logger = new Logger(PurchasesService.name);
+
   constructor(
     @InjectRepository(PurchaseInvoice)
     private readonly invoiceRepo: Repository<PurchaseInvoice>,
@@ -31,17 +46,53 @@ export class PurchasesService {
     private readonly wishListRepo: Repository<WishListItem>,
     @InjectRepository(PurchasePriceHistory)
     private readonly priceHistoryRepo: Repository<PurchasePriceHistory>,
+    @InjectRepository(PurchaseInvoiceChangelog)
+    private readonly changelogRepo: Repository<PurchaseInvoiceChangelog>,
     private readonly dataSource: DataSource,
   ) {}
+
+  private async writeChangelog(
+    invoiceId: string,
+    tenantId: string,
+    userId: string | null,
+    action: PurchaseInvoiceChangelog['action'],
+    changes: ChangeEntry[],
+  ): Promise<void> {
+    try {
+      await this.changelogRepo.save(this.changelogRepo.create({ invoiceId, tenantId, userId, action, changes }));
+    } catch (e: any) {
+      this.logger.warn(`changelog write failed: ${e.message}`);
+    }
+  }
+
+  private diffInvoice(before: PurchaseInvoice, dto: UpdateInvoiceDto, hasLineChanges: boolean): ChangeEntry[] {
+    const changes: ChangeEntry[] = [];
+    const TRACKED = ['supplierName', 'supplierInvoiceNumber', 'invoiceDate', 'paymentMethod', 'notes', 'discountType', 'discountValue'] as const;
+    for (const field of TRACKED) {
+      const oldVal = before[field] != null ? String(before[field]) : '';
+      const newVal = dto[field] != null ? String(dto[field]) : '';
+      if (oldVal !== newVal) {
+        changes.push({ field, fieldLabel: FIELD_LABELS[field] ?? field, oldValue: oldVal || null, newValue: newVal || null });
+      }
+    }
+    if (hasLineChanges) {
+      changes.push({ field: 'lines', fieldLabel: 'بنود المنتجات', oldValue: null, newValue: 'تم التحديث' });
+    }
+    return changes;
+  }
 
   // ─── PO / RPO numbering (atomic per-tenant) ─────────────────────────────────
 
   private async nextPoNumber(tenantId: string, em: EntityManager): Promise<{ poNumber: string; poSequence: number }> {
+    // FOR UPDATE cannot be used with aggregate functions — lock individual rows via subquery
+    await em.query(
+      `SELECT id FROM purchase_invoices WHERE "pharmacyTenantId" = $1 FOR UPDATE`,
+      [tenantId],
+    );
     const row = await em.query(
       `SELECT COALESCE(MAX("poSequence"), 0) AS max_seq
        FROM purchase_invoices
-       WHERE "pharmacyTenantId" = $1
-       FOR UPDATE`,
+       WHERE "pharmacyTenantId" = $1`,
       [tenantId],
     );
     const seq = Number(row[0].max_seq) + 1;
@@ -50,11 +101,14 @@ export class PurchasesService {
   }
 
   private async nextRpoNumber(tenantId: string, em: EntityManager): Promise<{ rpoNumber: string; rpoSequence: number }> {
+    await em.query(
+      `SELECT id FROM purchase_returns WHERE "pharmacyTenantId" = $1 FOR UPDATE`,
+      [tenantId],
+    );
     const row = await em.query(
       `SELECT COALESCE(MAX("rpoSequence"), 0) AS max_seq
        FROM purchase_returns
-       WHERE "pharmacyTenantId" = $1
-       FOR UPDATE`,
+       WHERE "pharmacyTenantId" = $1`,
       [tenantId],
     );
     const seq = Number(row[0].max_seq) + 1;
@@ -137,8 +191,13 @@ export class PurchasesService {
     const params: any[] = [tenantId, term, q];
     if (supplierId) params.push(supplierId);
     const supplierFilter = supplierId ? `AND "supplierTenantId" = $${params.length}` : '';
+
+    // Search the global products catalog with a LEFT JOIN to inventory.
+    // This returns BOTH stocked products (with real currentStock) AND catalog
+    // products the pharmacy has never purchased (currentStock = 0, inInventory = false).
+    // DISTINCT ON (p.id) ensures one row per product even if multiple batch rows exist.
     const rows = await this.dataSource.query(
-      `SELECT
+      `SELECT DISTINCT ON (p.id)
          i.id        AS "inventoryItemId",
          p.id,
          COALESCE(p."nameAr", p.name)  AS name,
@@ -146,12 +205,23 @@ export class PurchasesService {
          p."nameAr",
          p.sku,
          p.barcode,
-         i.quantity                     AS "currentStock",
+         COALESCE(
+           (SELECT COALESCE(SUM(ii.quantity), 0)
+            FROM inventory_items ii
+            WHERE ii."productId" = p.id
+              AND ii."pharmacyTenantId" = $1
+              AND ii."deletedAt" IS NULL),
+           0
+         )::int                         AS "currentStock",
          i."expiryDate",
          COALESCE(ph.price, i."costPrice", 0) AS "lastCostPrice",
-         ph."supplierName"              AS "lastSupplierName"
-       FROM inventory_items i
-       JOIN products p ON p.id = i."productId"
+         ph."supplierName"              AS "lastSupplierName",
+         (i.id IS NOT NULL)             AS "inInventory"
+       FROM products p
+       LEFT JOIN inventory_items i
+         ON i."productId" = p.id
+         AND i."pharmacyTenantId" = $1
+         AND i."deletedAt" IS NULL
        LEFT JOIN LATERAL (
          SELECT "supplierName", price
          FROM purchase_price_history
@@ -161,8 +231,8 @@ export class PurchasesService {
          ORDER BY "purchasedAt" DESC
          LIMIT 1
        ) ph ON true
-       WHERE i."pharmacyTenantId" = $1
-         AND i."deletedAt" IS NULL
+       WHERE p."isActive" = true
+         AND (p."disablePurchase" IS NOT TRUE)
          AND (
            p.name          ILIKE $2
            OR p."nameAr"   ILIKE $2
@@ -171,7 +241,9 @@ export class PurchasesService {
            OR p.barcode    = $3
            OR p.barcode    ILIKE $2
          )
-       ORDER BY i.quantity DESC, p.name
+       ORDER BY p.id,
+         CASE WHEN i.id IS NOT NULL THEN 0 ELSE 1 END,
+         i.quantity DESC NULLS LAST
        LIMIT 30`,
       params,
     );
@@ -223,7 +295,10 @@ export class PurchasesService {
   // ─── Invoices ────────────────────────────────────────────────────────────────
 
   async createInvoice(tenantId: string, dto: CreateInvoiceDto, userId: string) {
-    return this.dataSource.transaction(async (em) => {
+    this.logger.log(`createInvoice start — tenant=${tenantId} supplier="${dto.supplierName}" lines=${dto.lines?.length ?? 0} userId=${userId}`);
+    let createdId: string | null = null;
+    try {
+    const invoice = await this.dataSource.transaction(async (em) => {
       const { poNumber, poSequence } = await this.nextPoNumber(tenantId, em);
 
       const lines = (dto.lines ?? []).map((l, i) => ({
@@ -266,51 +341,161 @@ export class PurchasesService {
         relations: ['lines'],
       });
     });
+    createdId = invoice?.id ?? null;
+    if (createdId) {
+      await this.writeChangelog(createdId, tenantId, userId, 'created', []);
+    }
+    return invoice;
+    } catch (err) {
+      this.logger.error(
+        `createInvoice FAILED — tenant=${tenantId} supplier="${dto.supplierName}"`,
+        err?.message,
+        err?.stack,
+      );
+      throw err;
+    }
   }
 
   async getInvoices(tenantId: string, query: InvoiceQueryDto) {
-    const page  = Math.max(1, parseInt(query.page  ?? '1', 10));
-    const limit = Math.min(100, parseInt(query.limit ?? '20', 10));
+    const page   = Math.max(1, parseInt(query.page  ?? '1',  10));
+    const limit  = Math.min(100, parseInt(query.limit ?? '20', 10));
+    const offset = (page - 1) * limit;
 
-    const qb = this.invoiceRepo
-      .createQueryBuilder('i')
-      .where('i.pharmacyTenantId = :tenantId', { tenantId })
-      .andWhere('i.deletedAt IS NULL')
-      .select([
-        'i.id', 'i.poNumber', 'i.supplierName', 'i.supplierTenantId',
-        'i.invoiceDate', 'i.status', 'i.paymentStatus', 'i.paymentMethod',
-        'i.grandTotal', 'i.totalDiscount', 'i.createdAt',
-      ]);
+    const conditions: string[] = [
+      `i."pharmacyTenantId" = $1`,
+      `i."deletedAt" IS NULL`,
+    ];
+    const params: any[] = [tenantId];
 
     if (query.q) {
-      qb.andWhere('(i.poNumber ILIKE :q OR i.supplierName ILIKE :q OR i.supplierInvoiceNumber ILIKE :q)', { q: `%${query.q}%` });
+      params.push(`%${query.q}%`);
+      const p = params.length;
+      conditions.push(`(i."poNumber" ILIKE $${p} OR i."supplierName" ILIKE $${p} OR i."supplierInvoiceNumber" ILIKE $${p})`);
     }
     if (query.status) {
-      qb.andWhere('i.status = :status', { status: query.status });
+      params.push(query.status);
+      conditions.push(`i.status = $${params.length}`);
     }
     if (query.paymentStatus) {
-      qb.andWhere('i.paymentStatus = :ps', { ps: query.paymentStatus });
+      params.push(query.paymentStatus);
+      conditions.push(`i."paymentStatus" = $${params.length}`);
     }
     if (query.supplierId) {
-      qb.andWhere('i.supplierTenantId = :sid', { sid: query.supplierId });
+      params.push(query.supplierId);
+      conditions.push(`i."supplierTenantId" = $${params.length}`);
     }
     if (query.dateFrom) {
-      qb.andWhere('i.createdAt >= :from', { from: query.dateFrom });
+      params.push(query.dateFrom);
+      conditions.push(`i."createdAt" >= $${params.length}`);
     }
     if (query.dateTo) {
-      qb.andWhere('i.createdAt <= :to', { to: `${query.dateTo}T23:59:59` });
+      params.push(`${query.dateTo}T23:59:59`);
+      conditions.push(`i."createdAt" <= $${params.length}`);
     }
 
-    const [items, total] = await qb
-      .orderBy('i.createdAt', 'DESC')
-      .skip((page - 1) * limit)
-      .take(limit)
-      .getManyAndCount();
+    const where = conditions.join(' AND ');
+    const dataParams = [...params, limit, offset];
 
+    const [rows, countResult] = await Promise.all([
+      this.dataSource.query(
+        `SELECT
+           i.id, i."poNumber", i."supplierName", i."supplierTenantId",
+           i."supplierInvoiceNumber", i."invoiceDate",
+           i.status, i."paymentStatus", i."paymentMethod",
+           i."grandTotal", i."totalDiscount", i."createdAt", i."updatedAt",
+           COALESCE(i.source, 'manual') AS source,
+           (SELECT COUNT(*) FROM purchase_invoice_lines WHERE "invoiceId" = i.id)::int AS "linesCount"
+         FROM purchase_invoices i
+         WHERE ${where}
+         ORDER BY i."createdAt" DESC
+         LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams,
+      ),
+      this.dataSource.query(
+        `SELECT COUNT(*) AS total FROM purchase_invoices i WHERE ${where}`,
+        params,
+      ),
+    ]);
+
+    const total = parseInt(countResult[0].total, 10);
     return {
-      items,
+      items: rows,
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
+  }
+
+  async getInvoiceChangelog(tenantId: string, invoiceId: string) {
+    const rows = await this.dataSource.query(
+      `SELECT
+         c.id, c."invoiceId", c."userId", c.action, c.changes, c."createdAt",
+         CONCAT(u."firstName", ' ', u."lastName") AS "userName",
+         u.email AS "userEmail"
+       FROM purchase_invoice_changelogs c
+       LEFT JOIN users u ON u."kcId" = c."userId"::text
+       WHERE c."invoiceId" = $1 AND c."tenantId" = $2
+       ORDER BY c."createdAt" ASC`,
+      [invoiceId, tenantId],
+    );
+    return rows;
+  }
+
+  async exportSingleInvoice(tenantId: string, id: string, res: Response): Promise<void> {
+    const inv = await this.invoiceRepo.findOne({
+      where: { id, pharmacyTenantId: tenantId, deletedAt: IsNull() },
+      relations: ['lines'],
+    });
+    if (!inv) throw new NotFoundException('Invoice not found');
+
+    const safePoNumber = inv.poNumber.replace(/[^a-zA-Z0-9_-]/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${safePoNumber}.xlsx"; filename*=UTF-8''${encodeURIComponent(inv.poNumber)}.xlsx`);
+
+    const workbook = new (ExcelJS as any).Workbook();
+    const sheet = workbook.addWorksheet('تفاصيل الفاتورة');
+
+    sheet.mergeCells('A1:G1');
+    sheet.getCell('A1').value = `فاتورة: ${inv.poNumber}`;
+    sheet.getCell('A1').font = { bold: true, size: 14, color: { argb: 'FF1E5C3A' } };
+
+    const infoRows = [
+      ['المورد', inv.supplierName],
+      ['رقم فاتورة المورد', inv.supplierInvoiceNumber ?? '—'],
+      ['تاريخ الفاتورة', inv.invoiceDate ? new Date(inv.invoiceDate).toLocaleDateString('ar-EG') : '—'],
+      ['تاريخ الإنشاء', new Date(inv.createdAt).toLocaleDateString('ar-EG')],
+      ['الحالة', inv.status],
+      ['حالة الدفع', inv.paymentStatus],
+    ];
+    let rowIdx = 2;
+    for (const [label, val] of infoRows) {
+      sheet.getRow(rowIdx).values = ['', label, val];
+      rowIdx++;
+    }
+    rowIdx++;
+
+    const headerRow = sheet.getRow(rowIdx++);
+    headerRow.values = ['#', 'المنتج', 'الباتش', 'الكمية', 'السعر', 'الخصم%', 'الإجمالي'];
+    headerRow.font = { bold: true, color: { argb: 'FF1E5C3A' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9F0E8' } };
+    (headerRow as any).commit?.();
+
+    inv.lines.forEach((line, i) => {
+      sheet.getRow(rowIdx++).values = [
+        i + 1,
+        line.productName,
+        line.batchNumber ?? '',
+        line.purchaseQty,
+        parseFloat(line.purchasePrice),
+        parseFloat(line.discountPct),
+        parseFloat(line.lineTotal),
+      ];
+    });
+
+    rowIdx++;
+    sheet.getRow(rowIdx).values = ['', '', '', '', '', 'الإجمالي الكلي', parseFloat(inv.grandTotal as any)];
+    sheet.getRow(rowIdx).font = { bold: true };
+
+    await workbook.xlsx.write(res);
+    res.end();
   }
 
   async getInvoiceById(tenantId: string, id: string) {
@@ -322,8 +507,8 @@ export class PurchasesService {
     return inv;
   }
 
-  async updateInvoice(tenantId: string, id: string, dto: UpdateInvoiceDto) {
-    return this.dataSource.transaction(async (em) => {
+  async updateInvoice(tenantId: string, id: string, dto: UpdateInvoiceDto, userId?: string) {
+    const result = await this.dataSource.transaction(async (em) => {
       const invoice = await em.findOne(PurchaseInvoice, {
         where: { id, pharmacyTenantId: tenantId, deletedAt: null },
       });
@@ -331,6 +516,8 @@ export class PurchasesService {
       if (invoice.status !== 'draft') {
         throw new BadRequestException('Only draft invoices can be edited');
       }
+
+      const changes = this.diffInvoice(invoice, dto, !!(dto.lines && dto.lines.length > 0));
 
       const lines = (dto.lines ?? []).map((l, i) => ({
         ...l,
@@ -365,12 +552,20 @@ export class PurchasesService {
       );
       await em.save(PurchaseInvoiceLine, lineEntities);
 
-      return em.findOne(PurchaseInvoice, { where: { id }, relations: ['lines'] });
+      return { inv: await em.findOne(PurchaseInvoice, { where: { id }, relations: ['lines'] }), changes };
     });
+
+    if (result.changes.length > 0) {
+      await this.writeChangelog(id, tenantId, userId ?? null, 'updated', result.changes);
+    }
+    return result.inv;
   }
 
   async confirmInvoice(tenantId: string, id: string, userId: string) {
-    return this.dataSource.transaction(async (em) => {
+    let result: PurchaseInvoice | null;
+    try {
+    result = await this.dataSource.transaction(async (em) => {
+      this.logger.log(`confirmInvoice tx start — id=${id}`);
       const invoice = await em.findOne(PurchaseInvoice, {
         where: { id, pharmacyTenantId: tenantId, deletedAt: null },
         relations: ['lines'],
@@ -380,14 +575,15 @@ export class PurchasesService {
         throw new BadRequestException(`Cannot confirm invoice in '${invoice.status}' state`);
       }
 
-      invoice.status = 'received';
-      invoice.confirmedAt = new Date();
-      await em.save(PurchaseInvoice, invoice);
+      // Use em.update (not em.save) to avoid cascade-updating all invoice lines
+      await em.update(PurchaseInvoice, { id }, { status: 'received', confirmedAt: new Date() });
 
       // Update inventory + record price history
       for (const line of invoice.lines) {
+        this.logger.log(`confirmInvoice — upsertInventory productId=${line.productId} qty=${line.purchaseQty}`);
         await this.upsertInventoryItem(em, tenantId, line);
 
+        this.logger.log(`confirmInvoice — saving PurchasePriceHistory productId=${line.productId}`);
         await em.save(PurchasePriceHistory, em.create(PurchasePriceHistory, {
           pharmacyTenantId: tenantId,
           productId: line.productId,
@@ -400,10 +596,19 @@ export class PurchasesService {
       }
 
       // Remove from wish list if now stocked
+      this.logger.log(`confirmInvoice — syncWishList for ${invoice.lines.length} products`);
       await this.syncWishListAfterReceive(em, tenantId, invoice.lines.map(l => l.productId));
 
       return em.findOne(PurchaseInvoice, { where: { id }, relations: ['lines'] });
     });
+    await this.writeChangelog(id, tenantId, userId, 'confirmed', [
+      { field: 'status', fieldLabel: 'الحالة', oldValue: 'مسودة', newValue: 'مستلمة' },
+    ]);
+    return result;
+    } catch (err: any) {
+      this.logger.error(`confirmInvoice FAILED id=${id}: ${err?.message}`, err?.stack);
+      throw err;
+    }
   }
 
   private async upsertInventoryItem(em: EntityManager, tenantId: string, line: PurchaseInvoiceLine) {
@@ -418,17 +623,19 @@ export class PurchasesService {
       [tenantId, line.productId, line.batchNumber ?? null, line.expiryDate ?? null],
     );
 
-    const totalQty = line.purchaseQty + (line.freeGoodsQty ?? 0);
+    const totalQty   = Number(line.purchaseQty) + Number(line.freeGoodsQty ?? 0);
+    const costPrice  = Number(line.purchasePrice);
+    const salePrice  = Number(line.salePrice ?? 0);
 
     if (existing.length > 0) {
       await em.query(
         `UPDATE inventory_items
          SET quantity = quantity + $1,
              "costPrice" = $2,
-             "sellingPrice" = CASE WHEN $3 > 0 THEN $3 ELSE "sellingPrice" END,
+             "sellingPrice" = CASE WHEN $3::numeric > 0 THEN $3::numeric ELSE "sellingPrice" END,
              "updatedAt" = now()
          WHERE id = $4`,
-        [totalQty, line.purchasePrice, line.salePrice ?? 0, existing[0].id],
+        [totalQty, costPrice, salePrice, existing[0].id],
       );
     } else {
       await em.query(
@@ -440,8 +647,8 @@ export class PurchasesService {
           tenantId,
           line.productId,
           totalQty,
-          line.purchasePrice,
-          line.salePrice ?? line.purchasePrice,
+          costPrice,
+          salePrice > 0 ? salePrice : costPrice,
           line.batchNumber ?? null,
           line.expiryDate ?? null,
         ],
@@ -470,7 +677,7 @@ export class PurchasesService {
     }
   }
 
-  async markInvoicePaid(tenantId: string, id: string) {
+  async markInvoicePaid(tenantId: string, id: string, userId?: string) {
     const invoice = await this.invoiceRepo.findOne({
       where: { id, pharmacyTenantId: tenantId, deletedAt: null },
     });
@@ -480,7 +687,11 @@ export class PurchasesService {
     }
     invoice.paymentStatus = 'paid';
     invoice.status = 'paid';
-    return this.invoiceRepo.save(invoice);
+    const saved = await this.invoiceRepo.save(invoice);
+    await this.writeChangelog(id, tenantId, userId ?? null, 'paid', [
+      { field: 'paymentStatus', fieldLabel: 'حالة الدفع', oldValue: 'معلق', newValue: 'مدفوع' },
+    ]);
+    return saved;
   }
 
   async cancelInvoice(tenantId: string, id: string, userId: string) {
@@ -494,7 +705,11 @@ export class PurchasesService {
     invoice.status = 'cancelled';
     invoice.cancelledAt = new Date();
     invoice.cancelledBy = userId;
-    return this.invoiceRepo.save(invoice);
+    const saved = await this.invoiceRepo.save(invoice);
+    await this.writeChangelog(id, tenantId, userId, 'cancelled', [
+      { field: 'status', fieldLabel: 'الحالة', oldValue: 'مسودة', newValue: 'ملغاة' },
+    ]);
+    return saved;
   }
 
   async deleteInvoice(tenantId: string, id: string) {
@@ -510,27 +725,26 @@ export class PurchasesService {
   }
 
   async getInvoiceStats(tenantId: string) {
-    const [totals, pendingPay, wishList] = await Promise.all([
+    const [totals, wishList] = await Promise.all([
       this.dataSource.query(
         `SELECT
-           COUNT(*) FILTER (WHERE status IN ('received','paid')
-             AND DATE_TRUNC('month', "confirmedAt") = DATE_TRUNC('month', NOW())
+           -- This month: count ALL non-cancelled invoices created this month
+           COUNT(*) FILTER (WHERE status != 'cancelled'
+             AND DATE_TRUNC('month', "createdAt") = DATE_TRUNC('month', NOW())
            ) AS "thisMonthCount",
+           -- This month value: sum of received/paid invoices created this month
            COALESCE(SUM("grandTotal") FILTER (WHERE status IN ('received','paid')
-             AND DATE_TRUNC('month', "confirmedAt") = DATE_TRUNC('month', NOW())
+             AND DATE_TRUNC('month', "createdAt") = DATE_TRUNC('month', NOW())
            ), 0) AS "thisMonthValue",
+           -- All time
            COUNT(*) FILTER (WHERE status IN ('received','paid')) AS "totalInvoices",
            COALESCE(SUM("grandTotal") FILTER (WHERE status IN ('received','paid')), 0) AS "totalSpent",
+           -- Pending payment (received but not paid)
            COALESCE(SUM("grandTotal") FILTER (WHERE "paymentStatus" = 'pending' AND status IN ('received','paid')), 0) AS "totalPending",
-           COUNT(*) FILTER (WHERE status = 'draft') AS "draftCount"
+           COUNT(*) FILTER (WHERE status = 'draft') AS "draftCount",
+           COUNT(*) FILTER (WHERE "paymentStatus" = 'pending' AND status IN ('received','paid')) AS "pendingPaymentCount"
          FROM purchase_invoices
          WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL`,
-        [tenantId],
-      ),
-      this.dataSource.query(
-        `SELECT COUNT(*) AS cnt FROM purchase_invoices
-         WHERE "pharmacyTenantId" = $1 AND "paymentStatus" = 'pending'
-           AND status IN ('received','paid') AND "deletedAt" IS NULL`,
         [tenantId],
       ),
       this.dataSource.query(
@@ -541,7 +755,7 @@ export class PurchasesService {
 
     return {
       ...totals[0],
-      pendingPaymentCount: Number(pendingPay[0]?.cnt ?? 0),
+      pendingPaymentCount: Number(totals[0].pendingPaymentCount ?? 0),
       wishListCount: Number(wishList[0]?.cnt ?? 0),
     };
   }
@@ -817,6 +1031,87 @@ export class PurchasesService {
   }
 
   // ─── Nightly wish list auto-populate (called by cron) ────────────────────────
+
+  // ─── Excel export (streaming — handles millions of rows) ─────────────────────
+
+  async streamInvoicesToXlsx(tenantId: string, query: InvoiceQueryDto, res: Response): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="purchases_${today}.xlsx"; filename*=UTF-8''purchases_${today}.xlsx`);
+
+    const workbook = new (ExcelJS as any).stream.xlsx.WorkbookWriter({ stream: res });
+    const sheet = workbook.addWorksheet('فواتير المشتريات');
+
+    sheet.columns = [
+      { header: 'رقم الفاتورة',        key: 'poNumber',              width: 22 },
+      { header: 'المورد',              key: 'supplierName',           width: 30 },
+      { header: 'رقم فاتورة المورد',   key: 'supplierInvoiceNumber',  width: 22 },
+      { header: 'تاريخ الفاتورة',      key: 'invoiceDate',            width: 16 },
+      { header: 'الحالة',             key: 'status',                 width: 12 },
+      { header: 'حالة الدفع',         key: 'paymentStatus',          width: 12 },
+      { header: 'طريقة الدفع',        key: 'paymentMethod',          width: 16 },
+      { header: 'الإجمالي (ر.س)',     key: 'grandTotal',             width: 16 },
+      { header: 'إجمالي الخصم (ر.س)', key: 'totalDiscount',          width: 18 },
+      { header: 'تاريخ الإنشاء',      key: 'createdAt',              width: 20 },
+    ];
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FF1E5C3A' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9F0E8' } };
+    (headerRow as any).commit();
+
+    const qb = this.invoiceRepo
+      .createQueryBuilder('i')
+      .where('i.pharmacyTenantId = :tenantId', { tenantId })
+      .andWhere('i.deletedAt IS NULL')
+      .select([
+        'i.poNumber', 'i.supplierName', 'i.supplierInvoiceNumber',
+        'i.invoiceDate', 'i.status', 'i.paymentStatus', 'i.paymentMethod',
+        'i.grandTotal', 'i.totalDiscount', 'i.createdAt',
+      ]);
+
+    if (query.q) {
+      qb.andWhere('(i.poNumber ILIKE :q OR i.supplierName ILIKE :q OR i.supplierInvoiceNumber ILIKE :q)', { q: `%${query.q}%` });
+    }
+    if (query.status)        qb.andWhere('i.status = :status', { status: query.status });
+    if (query.paymentStatus) qb.andWhere('i.paymentStatus = :ps', { ps: query.paymentStatus });
+    if (query.supplierId)    qb.andWhere('i.supplierTenantId = :sid', { sid: query.supplierId });
+    if (query.dateFrom)      qb.andWhere('i.createdAt >= :from', { from: query.dateFrom });
+    if (query.dateTo)        qb.andWhere('i.createdAt <= :to',   { to: `${query.dateTo}T23:59:59` });
+
+    qb.orderBy('i.createdAt', 'DESC');
+
+    const STATUS_LABELS: Record<string, string> = {
+      draft: 'مسودة', received: 'مستلمة', paid: 'مدفوعة', cancelled: 'ملغاة',
+    };
+    const PAYMENT_LABELS: Record<string, string> = { pending: 'معلق', paid: 'مدفوع' };
+    const METHOD_LABELS: Record<string, string> = {
+      cash: 'نقدي', credit_card: 'بطاقة ائتمان', bank_transfer: 'تحويل بنكي', credit_term: 'أجل',
+    };
+    const fmtDate = (v: any) => v ? new Date(v).toLocaleDateString('ar-EG') : '';
+
+    const stream = await qb.stream();
+    await new Promise<void>((resolve, reject) => {
+      stream.on('data', (row: any) => {
+        sheet.addRow({
+          poNumber:              row.i_poNumber,
+          supplierName:          row.i_supplierName,
+          supplierInvoiceNumber: row.i_supplierInvoiceNumber ?? '',
+          invoiceDate:           fmtDate(row.i_invoiceDate),
+          status:                STATUS_LABELS[row.i_status] ?? row.i_status,
+          paymentStatus:         PAYMENT_LABELS[row.i_paymentStatus] ?? row.i_paymentStatus,
+          paymentMethod:         METHOD_LABELS[row.i_paymentMethod] ?? row.i_paymentMethod,
+          grandTotal:            parseFloat(row.i_grandTotal ?? '0'),
+          totalDiscount:         parseFloat(row.i_totalDiscount ?? '0'),
+          createdAt:             fmtDate(row.i_createdAt),
+        }).commit();
+      });
+      stream.on('end', resolve);
+      stream.on('error', reject);
+    });
+
+    await workbook.commit();
+  }
 
   async autoPopulateWishList(tenantId: string) {
     const lowStock = await this.dataSource.query(

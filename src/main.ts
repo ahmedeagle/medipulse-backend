@@ -20,10 +20,26 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const isProd = process.env.NODE_ENV === 'production';
 
+  // Fail fast in production if required env vars are missing
+  if (isProd && !process.env.FRONTEND_URL) {
+    throw new Error('FRONTEND_URL must be set in production');
+  }
+
   // ── Security headers ───────────────────────────────────────────────────────
   app.use(
     helmet({
-      contentSecurityPolicy: isProd,
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: isProd ? ["'self'"] : ["'self'", "'unsafe-eval'", "'unsafe-inline'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", 'data:', 'blob:'],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'", 'data:'],
+          objectSrc: ["'none'"],
+          frameSrc: ["'none'"],
+        },
+      },
       crossOriginEmbedderPolicy: false,
     }),
   );
@@ -55,36 +71,36 @@ async function bootstrap() {
   // ── Global prefix ──────────────────────────────────────────────────────────
   app.setGlobalPrefix('api/v1');
 
-  // ── Bull Board — queue monitoring UI ──────────────────────────────────────
-  // Protected by BULL_BOARD_API_KEY — share only with ops/system-admin users.
-  // Accessible at /admin/queues regardless of NODE_ENV (skip in prod if unwanted).
-  const boardAdapter = new BullBoardExpressAdapter();
-  boardAdapter.setBasePath('/admin/queues');
+  // ── Bull Board — queue monitoring UI (development only) ───────────────────
+  if (!isProd) {
+    const boardAdapter = new BullBoardExpressAdapter();
+    boardAdapter.setBasePath('/admin/queues');
 
-  createBullBoard({
-    queues: [
-      new BullMQAdapter(app.get<Queue>(getQueueToken(AI_RECOMMENDATIONS_QUEUE))),
-      new BullMQAdapter(app.get<Queue>(getQueueToken(AUDIT_QUEUE))),
-      new BullMQAdapter(app.get<Queue>(getQueueToken(WEBHOOK_DELIVERY_QUEUE))),
-    ],
-    serverAdapter: boardAdapter,
-    options: { uiConfig: { boardTitle: 'MediPulse Queues' } },
-  });
+    createBullBoard({
+      queues: [
+        new BullMQAdapter(app.get<Queue>(getQueueToken(AI_RECOMMENDATIONS_QUEUE))),
+        new BullMQAdapter(app.get<Queue>(getQueueToken(AUDIT_QUEUE))),
+        new BullMQAdapter(app.get<Queue>(getQueueToken(WEBHOOK_DELIVERY_QUEUE))),
+      ],
+      serverAdapter: boardAdapter,
+      options: { uiConfig: { boardTitle: 'MediPulse Queues' } },
+    });
 
-  const bullBoardApiKey = process.env.BULL_BOARD_API_KEY;
+    const bullBoardApiKey = process.env.BULL_BOARD_API_KEY;
 
-  app.use(
-    '/admin/queues',
-    (req: any, res: any, next: any) => {
-      const token = (req.headers['authorization'] ?? '').replace('Bearer ', '').trim();
-      if (!bullBoardApiKey || token !== bullBoardApiKey) {
-        res.status(401).json({ message: 'Unauthorized' });
-        return;
-      }
-      next();
-    },
-    boardAdapter.getRouter(),
-  );
+    app.use(
+      '/admin/queues',
+      (req: any, res: any, next: any) => {
+        const token = (req.headers['authorization'] ?? '').replace('Bearer ', '').trim();
+        if (!bullBoardApiKey || token !== bullBoardApiKey) {
+          res.status(401).json({ message: 'Unauthorized' });
+          return;
+        }
+        next();
+      },
+      boardAdapter.getRouter(),
+    );
+  }
 
   // ── Swagger — dev only ─────────────────────────────────────────────────────
   if (!isProd) {

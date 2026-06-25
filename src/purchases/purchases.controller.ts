@@ -1,23 +1,32 @@
 import {
   Body, Controller, Delete, Get, Param, ParseUUIDPipe,
-  Patch, Post, Query, UseGuards, HttpCode, HttpStatus,
+  Patch, Post, Query, UseGuards, HttpCode, HttpStatus, Res,
+  UseInterceptors, UploadedFile, BadRequestException,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { Response } from 'express';
 import { JwtAuthGuard }    from '../common/guards/jwt-auth.guard';
 import { RolesGuard }      from '../common/guards/roles.guard';
 import { Roles }           from '../common/decorators/roles.decorator';
 import { CurrentUser }     from '../common/decorators/current-user.decorator';
 import { Role }            from '../common/enums/role.enum';
 import { PurchasesService } from './purchases.service';
+import { OcrService } from './ocr.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { CreateReturnDto }  from './dto/create-return.dto';
 import { InvoiceQueryDto, ReturnQueryDto } from './dto/invoice-query.dto';
+import { CreateWishListItemDto, UpdateWishListItemDto } from './dto/wishlist.dto';
+import { Throttle } from '@nestjs/throttler';
 
 @Controller('pharmacy/purchases')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.PHARMACY_ADMIN)
 export class PurchasesController {
-  constructor(private readonly svc: PurchasesService) {}
+  constructor(
+    private readonly svc: PurchasesService,
+    private readonly ocrSvc: OcrService,
+  ) {}
 
   // ─── Stats & Search ──────────────────────────────────────────────────────────
 
@@ -66,6 +75,23 @@ export class PurchasesController {
 
   // ─── Invoices ────────────────────────────────────────────────────────────────
 
+  // ─── OCR (PUR-011) ───────────────────────────────────────────────────────────
+
+  @Post('invoices/ocr')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @UseInterceptors(FileInterceptor('image', { limits: { fileSize: 8 * 1024 * 1024 } }))
+  async analyzeInvoiceOcr(
+    @CurrentUser() user: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('يرجى إرفاق صورة الفاتورة (حقل: image)');
+    const allowed = ['image/jpeg', 'image/png', 'image/tiff', 'image/bmp', 'application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      throw new BadRequestException('نوع الملف غير مدعوم. يُرجى رفع صورة JPG أو PNG أو PDF.');
+    }
+    return this.ocrSvc.analyzeInvoice(file.buffer, file.mimetype, user.pharmacyTenantId);
+  }
+
   @Post('invoices')
   createInvoice(@CurrentUser() user: any, @Body() dto: CreateInvoiceDto) {
     return this.svc.createInvoice(user.pharmacyTenantId, dto, user.sub);
@@ -74,6 +100,33 @@ export class PurchasesController {
   @Get('invoices')
   getInvoices(@CurrentUser() user: any, @Query() query: InvoiceQueryDto) {
     return this.svc.getInvoices(user.pharmacyTenantId, query);
+  }
+
+  @Get('invoices/export')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  exportInvoices(
+    @CurrentUser() user: any,
+    @Query() query: InvoiceQueryDto,
+    @Res() res: Response,
+  ) {
+    return this.svc.streamInvoicesToXlsx(user.pharmacyTenantId, query, res);
+  }
+
+  @Get('invoices/:id/changelog')
+  getInvoiceChangelog(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.svc.getInvoiceChangelog(user.pharmacyTenantId, id);
+  }
+
+  @Get('invoices/:id/export')
+  exportInvoice(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res() res: Response,
+  ) {
+    return this.svc.exportSingleInvoice(user.pharmacyTenantId, id, res);
   }
 
   @Get('invoices/:id')
@@ -87,7 +140,7 @@ export class PurchasesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateInvoiceDto,
   ) {
-    return this.svc.updateInvoice(user.pharmacyTenantId, id, dto);
+    return this.svc.updateInvoice(user.pharmacyTenantId, id, dto, user.sub);
   }
 
   @Post('invoices/:id/confirm')
@@ -99,7 +152,7 @@ export class PurchasesController {
   @Post('invoices/:id/pay')
   @HttpCode(HttpStatus.OK)
   markPaid(@CurrentUser() user: any, @Param('id', ParseUUIDPipe) id: string) {
-    return this.svc.markInvoicePaid(user.pharmacyTenantId, id);
+    return this.svc.markInvoicePaid(user.pharmacyTenantId, id, user.sub);
   }
 
   @Post('invoices/:id/cancel')
@@ -151,7 +204,7 @@ export class PurchasesController {
   }
 
   @Post('wishlist')
-  addWishListItem(@CurrentUser() user: any, @Body() dto: any) {
+  addWishListItem(@CurrentUser() user: any, @Body() dto: CreateWishListItemDto) {
     return this.svc.addWishListItem(user.pharmacyTenantId, dto);
   }
 
@@ -159,7 +212,7 @@ export class PurchasesController {
   updateWishListItem(
     @CurrentUser() user: any,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: any,
+    @Body() dto: UpdateWishListItemDto,
   ) {
     return this.svc.updateWishListItem(user.pharmacyTenantId, id, dto);
   }

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class CreateProductDto {
   @ApiProperty({ example: 'Amoxicillin 500mg Capsules' })
@@ -42,6 +42,10 @@ export class CreateProductDto {
   @IsOptional() @IsString()
   description?: string;
 
+  @ApiPropertyOptional({ example: 'Amoxicillin trihydrate', description: 'Active pharmaceutical ingredient / المادة الفعالة (INN). Auto-populated from WHO catalog.' })
+  @IsOptional() @IsString()
+  activeIngredient?: string;
+
   @ApiPropertyOptional({ example: 'J01CA04' })
   @IsOptional() @IsString()
   atcCode?: string;
@@ -77,4 +81,28 @@ export class CreateProductDto {
   })
   @IsOptional() @IsBoolean()
   forceCreate?: boolean;
+
+  @ApiPropertyOptional({ example: 15, description: 'VAT / tax rate % (0–100). Default 0 = tax-exempt.' })
+  @IsOptional() @IsNumber() @Min(0) @Max(100)
+  taxRate?: number;
+
+  @ApiPropertyOptional({ description: 'False = product is archived/discontinued (hidden from POS and purchase orders). Default true.' })
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({ description: 'Block this product from being sold at POS.' })
+  @IsOptional() @IsBoolean()
+  disablePOSSale?: boolean;
+
+  @ApiPropertyOptional({ description: 'Block this product from appearing on purchase orders.' })
+  @IsOptional() @IsBoolean()
+  disablePurchase?: boolean;
+
+  @ApiPropertyOptional({ description: 'Product is eligible for return/refund. Default true.' })
+  @IsOptional() @IsBoolean()
+  returnable?: boolean;
+
+  @ApiPropertyOptional({ description: 'Discounts can be applied at POS checkout. Default true.' })
+  @IsOptional() @IsBoolean()
+  discountAllowed?: boolean;
 }

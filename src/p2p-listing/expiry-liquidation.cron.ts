@@ -4,6 +4,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { DataSource } from 'typeorm';
 import { ApprovalService } from '../ai-governance/approval.service';
 import { NotificationService } from '../notifications/notification.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 import { EVENTS } from '../events/domain-events';
 
 interface NearExpiryRow {
@@ -39,6 +40,7 @@ export class ExpiryLiquidationCron {
     private readonly dataSource: DataSource,
     private readonly approvals: ApprovalService,
     private readonly notifications: NotificationService,
+    private readonly settingsSvc: PharmacySettingsService,
   ) {}
 
   /** Runs daily at 8:30 AM UTC — after the expired-inventory cron (6:00 AM). */
@@ -180,13 +182,15 @@ export class ExpiryLiquidationCron {
 
     if (!approval) return; // agent disabled or confidence below tenant threshold
 
-    await this.notifications.create({
-      tenantId:    row.pharmacyTenantId,
-      type:        'near_expiry',
-      title:       `تصفية مقترحة: ${productLabel}`,
-      body:        `${row.quantity} وحدة تنتهي في ${daysToExpiry} يوم — راجع مهمة التصفية في مركز الذكاء`,
-      resourceRef: `/pharmacy/ai-center?tab=tasks&task=expiry_clearance`,
-    });
+    if (await this.settingsSvc.getNotifFlag(row.pharmacyTenantId, 'enableClearanceAlerts')) {
+      await this.notifications.create({
+        tenantId:    row.pharmacyTenantId,
+        type:        'near_expiry',
+        title:       `تصفية مقترحة: ${productLabel}`,
+        body:        `${row.quantity} وحدة تنتهي في ${daysToExpiry} يوم — راجع مهمة التصفية في مركز الذكاء`,
+        resourceRef: `/pharmacy/ai-center?tab=tasks&task=expiry_clearance`,
+      });
+    }
   }
 
   private discountConfig(daysToExpiry: number): {

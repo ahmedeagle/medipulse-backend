@@ -73,6 +73,24 @@ export interface CategorySalesRow {
   grossMarginPct:      number;
 }
 
+export interface SalesReportTotals {
+  qtySold:             number;
+  qtyReturned:         number;
+  invoiceCount:        number;
+  totalSales:          number;
+  salesBeforeDiscount: number;
+  totalReturns:        number;
+  totalDiscounts:      number;
+  netSales:            number;
+  cogs:                number;
+  grossMargin:         number;
+  grossMarginPct:      number;
+}
+
+export interface PaginatedWithTotals<T> extends Paginated<T> {
+  totals: SalesReportTotals;
+}
+
 export interface InventoryReportRow {
   productCode:      string;
   productName:      string;
@@ -344,6 +362,11 @@ export class AnalyticsReadService {
     });
   }
 
+  async getRegionalPricingForSupplier(productId: string, supplierTenantId: string): Promise<RegionalPrice[]> {
+    const all = await this.getRegionalPricing(productId);
+    return all.filter(r => r.supplierTenantId === supplierTenantId);
+  }
+
   // ─── Sales Summary Report ─────────────────────────────────────────────────
 
   async getSalesSummary(
@@ -360,12 +383,12 @@ export class AnalyticsReadService {
   ): Promise<Paginated<SalesSummaryRow>> {
     const { granularity, dateFrom, dateTo, cashierName, hideZeroRows = false } = params;
 
-    let trunc: string, fmt: string;
-    switch (granularity) {
-      case 'monthly': trunc = 'month'; fmt = 'YYYY-MM';       break;
-      case 'weekly':  trunc = 'week';  fmt = 'IYYY-"W"IW';    break;
-      default:        trunc = 'day';   fmt = 'YYYY-MM-DD';
-    }
+    const TRUNC_MAP: Record<'daily' | 'weekly' | 'monthly', { trunc: string; fmt: string }> = {
+      daily:   { trunc: 'day',   fmt: 'YYYY-MM-DD' },
+      weekly:  { trunc: 'week',  fmt: 'IYYY-"W"IW' },
+      monthly: { trunc: 'month', fmt: 'YYYY-MM' },
+    };
+    const { trunc, fmt } = TRUNC_MAP[granularity] ?? TRUNC_MAP['daily'];
 
     const dateToExclusive = new Date(dateTo);
     dateToExclusive.setDate(dateToExclusive.getDate() + 1);
@@ -504,7 +527,7 @@ export class AnalyticsReadService {
       page?: number;
       pageSize?: number;
     },
-  ): Promise<Paginated<ProductSalesRow>> {
+  ): Promise<PaginatedWithTotals<ProductSalesRow>> {
     const { dateFrom, dateTo, search, category } = params;
 
     const dateToExclusive = new Date(dateTo);
@@ -566,14 +589,44 @@ export class AnalyticsReadService {
             AND tx."createdAt" < $3::date
             ${extraWhere}
           GROUP BY ti."productId", ti."productName", p.id, p.sku, p.name, p.category, DATE(tx."createdAt")
+        ),
+        agg AS (
+          SELECT
+            COALESCE(SUM(b."qtySold"), 0)::int                             AS "totQtySold",
+            COALESCE(SUM(b."qtyReturned"), 0)::int                        AS "totQtyReturned",
+            COALESCE(SUM(b."invoiceCount"), 0)::int                       AS "totInvoiceCount",
+            ROUND(COALESCE(SUM(b."totalSales"), 0)::numeric, 2)           AS "totTotalSales",
+            ROUND(COALESCE(SUM(b."salesBeforeDiscount"), 0)::numeric, 2)  AS "totSalesBeforeDiscount",
+            ROUND(COALESCE(SUM(b."totalReturns"), 0)::numeric, 2)         AS "totTotalReturns",
+            ROUND(COALESCE(SUM(b."totalDiscounts"), 0)::numeric, 2)       AS "totTotalDiscounts",
+            ROUND(COALESCE(SUM(b."netSales"), 0)::numeric, 2)             AS "totNetSales",
+            ROUND(COALESCE(SUM(b."cogs"), 0)::numeric, 2)                 AS "totCogs",
+            ROUND(COALESCE(SUM(b."grossMargin"), 0)::numeric, 2)          AS "totGrossMargin"
+          FROM base b
         )
-        SELECT COUNT(*) OVER() AS _total, base.*
-        FROM base
+        SELECT COUNT(*) OVER() AS _total, base.*, agg.*
+        FROM base, agg
         ORDER BY base."saleDate" DESC, base."netSales" DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}
       `, bindings);
 
       const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+      const totNetSales    = rows.length > 0 ? Number(rows[0].totNetSales)    : 0;
+      const totGrossMargin = rows.length > 0 ? Number(rows[0].totGrossMargin) : 0;
+      const totals: SalesReportTotals = {
+        qtySold:             rows.length > 0 ? Number(rows[0].totQtySold)             : 0,
+        qtyReturned:         rows.length > 0 ? Number(rows[0].totQtyReturned)         : 0,
+        invoiceCount:        rows.length > 0 ? Number(rows[0].totInvoiceCount)        : 0,
+        totalSales:          rows.length > 0 ? Number(rows[0].totTotalSales)          : 0,
+        salesBeforeDiscount: rows.length > 0 ? Number(rows[0].totSalesBeforeDiscount) : 0,
+        totalReturns:        rows.length > 0 ? Number(rows[0].totTotalReturns)        : 0,
+        totalDiscounts:      rows.length > 0 ? Number(rows[0].totTotalDiscounts)      : 0,
+        netSales:            totNetSales,
+        cogs:                rows.length > 0 ? Number(rows[0].totCogs)                : 0,
+        grossMargin:         totGrossMargin,
+        grossMarginPct:      totNetSales > 0 ? Math.round((totGrossMargin / totNetSales) * 1000) / 10 : 0,
+      };
+
       const data = rows.map(r => ({
         productCode:         r.productCode        ?? '',
         productName:         r.productName        ?? '',
@@ -599,7 +652,7 @@ export class AnalyticsReadService {
           : 0,
       }));
 
-      return { data, total };
+      return { data, total, totals };
     } catch (err) {
       this.logger.error(
         `getSalesByProduct FAILED — tenant=${tenantId} dateFrom=${dateFrom} dateTo=${dateTo}`,
@@ -649,7 +702,7 @@ export class AnalyticsReadService {
       page?: number;
       pageSize?: number;
     },
-  ): Promise<Paginated<CategorySalesRow>> {
+  ): Promise<PaginatedWithTotals<CategorySalesRow>> {
     const { dateFrom, dateTo, category } = params;
 
     const dateToExclusive = new Date(dateTo);
@@ -700,14 +753,44 @@ export class AnalyticsReadService {
             AND tx."createdAt" < $3::date
             ${extraWhere}
           GROUP BY COALESCE(p.category, 'بدون فئة'), DATE(tx."createdAt")
+        ),
+        agg AS (
+          SELECT
+            COALESCE(SUM(b."qtySold"), 0)::int                             AS "totQtySold",
+            COALESCE(SUM(b."qtyReturned"), 0)::int                        AS "totQtyReturned",
+            COALESCE(SUM(b."invoiceCount"), 0)::int                       AS "totInvoiceCount",
+            ROUND(COALESCE(SUM(b."totalSales"), 0)::numeric, 2)           AS "totTotalSales",
+            ROUND(COALESCE(SUM(b."salesBeforeDiscount"), 0)::numeric, 2)  AS "totSalesBeforeDiscount",
+            ROUND(COALESCE(SUM(b."totalReturns"), 0)::numeric, 2)         AS "totTotalReturns",
+            ROUND(COALESCE(SUM(b."totalDiscounts"), 0)::numeric, 2)       AS "totTotalDiscounts",
+            ROUND(COALESCE(SUM(b."netSales"), 0)::numeric, 2)             AS "totNetSales",
+            ROUND(COALESCE(SUM(b."cogs"), 0)::numeric, 2)                 AS "totCogs",
+            ROUND(COALESCE(SUM(b."grossMargin"), 0)::numeric, 2)          AS "totGrossMargin"
+          FROM base b
         )
-        SELECT COUNT(*) OVER() AS _total, base.*
-        FROM base
+        SELECT COUNT(*) OVER() AS _total, base.*, agg.*
+        FROM base, agg
         ORDER BY base."saleDate" DESC, base."netSales" DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}
       `, bindings);
 
       const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+      const totNetSales    = rows.length > 0 ? Number(rows[0].totNetSales)    : 0;
+      const totGrossMargin = rows.length > 0 ? Number(rows[0].totGrossMargin) : 0;
+      const totals: SalesReportTotals = {
+        qtySold:             rows.length > 0 ? Number(rows[0].totQtySold)             : 0,
+        qtyReturned:         rows.length > 0 ? Number(rows[0].totQtyReturned)         : 0,
+        invoiceCount:        rows.length > 0 ? Number(rows[0].totInvoiceCount)        : 0,
+        totalSales:          rows.length > 0 ? Number(rows[0].totTotalSales)          : 0,
+        salesBeforeDiscount: rows.length > 0 ? Number(rows[0].totSalesBeforeDiscount) : 0,
+        totalReturns:        rows.length > 0 ? Number(rows[0].totTotalReturns)        : 0,
+        totalDiscounts:      rows.length > 0 ? Number(rows[0].totTotalDiscounts)      : 0,
+        netSales:            totNetSales,
+        cogs:                rows.length > 0 ? Number(rows[0].totCogs)                : 0,
+        grossMargin:         totGrossMargin,
+        grossMarginPct:      totNetSales > 0 ? Math.round((totGrossMargin / totNetSales) * 1000) / 10 : 0,
+      };
+
       const data = rows.map(r => ({
         category:            r.category            ?? '',
         saleDate:            r.saleDate,
@@ -726,7 +809,7 @@ export class AnalyticsReadService {
           : 0,
       }));
 
-      return { data, total };
+      return { data, total, totals };
     } catch (err) {
       this.logger.error(
         `getSalesByCategory FAILED — tenant=${tenantId} dateFrom=${dateFrom} dateTo=${dateTo}`,

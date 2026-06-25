@@ -37,7 +37,10 @@ import { BatchesService } from './batches.service';
 import { CreateInventoryItemDto } from './dto/create-inventory-item.dto';
 import { UpdateInventoryItemDto } from './dto/update-inventory-item.dto';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CreateProductWithBatchDto } from './dto/create-product-with-batch.dto';
 import { CreateBatchDto } from './dto/create-batch.dto';
+import { AdjustBatchDto } from './dto/adjust-batch.dto';
+import { UpdateBatchDto } from './dto/update-batch.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -264,14 +267,14 @@ export class InventoryController {
   adjustBatch(
     @CurrentUser() user: any,
     @Param('batchId', ParseUUIDPipe) batchId: string,
-    @Body() body: { delta: number; reason?: string },
+    @Body() body: AdjustBatchDto,
   ) {
     return this.batchesService.adjustQuantity(
       user.tenantId,
       user.id,
       batchId,
-      Number(body?.delta) || 0,
-      body?.reason,
+      body.delta,
+      body.reason,
     );
   }
 
@@ -283,14 +286,7 @@ export class InventoryController {
   updateBatch(
     @CurrentUser() user: any,
     @Param('batchId', ParseUUIDPipe) batchId: string,
-    @Body() body: {
-      batchNumber?: string;
-      expiryDate?: string | null;
-      location?: string | null;
-      costPerUnit?: number;
-      sellingPrice?: number;
-      notes?: string | null;
-    },
+    @Body() body: UpdateBatchDto,
   ) {
     return this.batchesService.updateBatch(user.tenantId, user.id, batchId, body);
   }
@@ -419,6 +415,23 @@ export class InventoryController {
     return this.barcodeSvc.lookup(barcode.replace(/\s/g, ''));
   }
 
+  @Get('products/smart')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'F-05 Smart product table — products with live batch stats',
+    description: 'Returns products enriched with batchCount, nearestExpiry, totalStock, stockStatus, barcodeWarning. Server-side pagination + HAVING filter.',
+  })
+  @ApiOkResponse({ description: '{ data: SmartProduct[], total: number }' })
+  findSmartProducts(
+    @CurrentUser() user: any,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('take', new DefaultValuePipe(25), ParseIntPipe) take = 25,
+    @Query('skip', new DefaultValuePipe(0),  ParseIntPipe) skip = 0,
+  ) {
+    return this.inventoryService.findSmartProducts(user.tenantId, { search, status, take, skip });
+  }
+
   @Get('products')
   @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN, Role.SYSTEM_ADMIN)
   @ApiOperation({
@@ -432,6 +445,34 @@ export class InventoryController {
     @Query('skip', new DefaultValuePipe(0),  ParseIntPipe) skip = 0,
   ) {
     return this.inventoryService.findAllProducts(search, take, skip);
+  }
+
+  @Post('products/with-batch')
+  @Roles(Role.SUPPLIER_ADMIN, Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'F-07: Create product + first batch atomically (WHO→Batch one-flow)' })
+  @ApiCreatedResponse({ description: 'Product (and optionally first batch) created' })
+  async createProductWithBatch(@CurrentUser() user: any, @Body() dto: CreateProductWithBatchDto) {
+    const isAdminCreator = user.role === Role.SUPPLIER_ADMIN || user.role === Role.PHARMACY_ADMIN;
+    if (isAdminCreator && !dto.forceCreate) {
+      const candidates = await this.matchingService.findCandidates(
+        { name: dto.name, nameAr: dto.nameAr, barcode: dto.barcode, manufacturer: dto.manufacturer, strength: dto.strength, dosageForm: dto.dosageForm },
+        5,
+      );
+      const strong = candidates.filter(c => c.score >= 85);
+      if (strong.length > 0) {
+        throw new ConflictException({
+          code: 'SIMILAR_PRODUCT_EXISTS',
+          message: 'يوجد منتج مشابه بالفعل في الكتالوج. راجع الاقتراحات قبل إنشاء منتج جديد.',
+          requiresForceCreate: true,
+          candidates: strong.map(c => ({
+            productId: c.product.id, score: c.score, signals: c.signals, reasons: c.reasons,
+            product: { id: c.product.id, name: c.product.name, nameAr: c.product.nameAr, manufacturer: c.product.manufacturer, strength: c.product.strength, dosageForm: c.product.dosageForm, barcode: c.product.barcode },
+          })),
+        });
+      }
+    }
+    if (isAdminCreator) dto.requiresMapping = true;
+    return this.inventoryService.createProductWithBatch(user.tenantId, user.sub, dto);
   }
 
   @Post('products')
@@ -496,5 +537,34 @@ export class InventoryController {
       return this.inventoryService.createProduct({ ...dto, requiresMapping: true });
     }
     return this.inventoryService.createProduct(dto);
+  }
+
+  // ── F-08: Product image upload ───────────────────────────────────────────────
+
+  @Post('products/:id/image')
+  @Roles(Role.SYSTEM_ADMIN)
+  @ApiOperation({ summary: 'F-08: Upload product image (JPG/PNG, max 2MB)' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', properties: { image: { type: 'string', format: 'binary' } } } })
+  @UseInterceptors(FileInterceptor('image', {
+    limits: { fileSize: 2 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      if (['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) cb(null, true);
+      else cb(new BadRequestException('Only JPG, PNG, or WebP images are accepted'), false);
+    },
+  }))
+  async uploadProductImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('يرجى إرفاق صورة المنتج');
+    return this.inventoryService.saveProductImage(id, file);
+  }
+
+  @Delete('products/:id/image')
+  @Roles(Role.SYSTEM_ADMIN)
+  @ApiOperation({ summary: 'F-08: Remove product image' })
+  async deleteProductImage(@Param('id', ParseUUIDPipe) id: string) {
+    return this.inventoryService.removeProductImage(id);
   }
 }

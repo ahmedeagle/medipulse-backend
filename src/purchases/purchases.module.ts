@@ -1,17 +1,22 @@
 import { Module }             from '@nestjs/common';
 import { TypeOrmModule }      from '@nestjs/typeorm';
+import { MulterModule }       from '@nestjs/platform-express';
 import { PurchaseInvoice }     from './entities/purchase-invoice.entity';
 import { PurchaseInvoiceLine } from './entities/purchase-invoice-line.entity';
 import { PurchaseReturn }      from './entities/purchase-return.entity';
 import { PurchaseReturnLine }  from './entities/purchase-return-line.entity';
 import { WishListItem }        from './entities/wish-list-item.entity';
 import { PurchasePriceHistory } from './entities/purchase-price-history.entity';
+import { PurchaseInvoiceChangelog } from './entities/purchase-invoice-changelog.entity';
+import { Product }             from '../inventory/entities/product.entity';
 import { PurchasesService }    from './purchases.service';
 import { PurchasesController } from './purchases.controller';
 import { WishListCron }        from './wish-list.cron';
+import { OcrService }          from './ocr.service';
 
 @Module({
   imports: [
+    MulterModule.register({ limits: { fileSize: 8 * 1024 * 1024 } }),
     TypeOrmModule.forFeature([
       PurchaseInvoice,
       PurchaseInvoiceLine,
@@ -19,10 +24,12 @@ import { WishListCron }        from './wish-list.cron';
       PurchaseReturnLine,
       WishListItem,
       PurchasePriceHistory,
+      PurchaseInvoiceChangelog,
+      Product,
     ]),
   ],
   controllers: [PurchasesController],
-  providers: [PurchasesService, WishListCron],
+  providers: [PurchasesService, WishListCron, OcrService],
   exports: [TypeOrmModule, PurchasesService],
 })
 export class PurchasesModule {}

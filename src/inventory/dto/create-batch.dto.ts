@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsString,
   IsOptional,
   IsInt,
@@ -19,6 +20,11 @@ export class CreateBatchDto {
   @IsInt()
   @Min(1)
   quantity: number;
+
+  @ApiPropertyOptional({ description: 'Set true for medical devices / consumables that have no expiry date (gloves, syringes, etc.). When true, expiryDate is ignored.' })
+  @IsOptional()
+  @IsBoolean()
+  noExpiry?: boolean;
 
   @ApiPropertyOptional({ example: '2027-12-31' })
   @IsOptional()

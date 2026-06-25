@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { DataSource } from 'typeorm';
 import { ApprovalService } from '../ai-governance/approval.service';
 import { NotificationService } from '../notifications/notification.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 interface StaleOrderRow {
   id: string;
@@ -29,6 +30,7 @@ export class P2pOrderMonitorCron {
     private readonly dataSource: DataSource,
     private readonly approvals: ApprovalService,
     private readonly notifications: NotificationService,
+    private readonly settingsSvc: PharmacySettingsService,
   ) {}
 
   @Cron('*/15 * * * *')
@@ -152,13 +154,15 @@ export class P2pOrderMonitorCron {
     if (!approval) return; // agent disabled or below minConfidence for this tenant
 
     // Send in-app notification so the pharmacist sees the badge
-    await this.notifications.create({
-      tenantId:    cfg.tenantId(row),
-      type:        'p2p_order_action_required',
-      title:       cfg.title(row),
-      body:        cfg.summary(row),
-      resourceRef: `p2p_order:${row.id}`,
-    });
+    if (await this.settingsSvc.getNotifFlag(cfg.tenantId(row), 'enableP2POrderAlerts')) {
+      await this.notifications.create({
+        tenantId:    cfg.tenantId(row),
+        type:        'p2p_order_action_required',
+        title:       cfg.title(row),
+        body:        cfg.summary(row),
+        resourceRef: `p2p_order:${row.id}`,
+      });
+    }
   }
 
   private scenarioCfg(row: StaleOrderRow) {

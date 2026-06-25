@@ -155,7 +155,7 @@ export class SmartProcurementCron {
           'p2p_smart_procurement_opportunity',
           todayStart,
         );
-        if (!alreadySent) {
+        if (!alreadySent && await this.pharmacySettings.getNotifFlag(tenantId, 'enableSmartProcurementAlerts')) {
           await this.notifications.create({
             tenantId,
             type: 'p2p_smart_procurement_opportunity',

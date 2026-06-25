@@ -425,10 +425,20 @@ export class ChatService {
 
   // ── Tool 1: Inventory KPI ─────────────────────────────────────────────────
   private async toolInventoryKpi(tenantId: string) {
-    const s = await this.dashboard.summary(tenantId);
+    const [s, totalRows] = await Promise.all([
+      this.dashboard.summary(tenantId),
+      this.dataSource.query<{ total: string }[]>(
+        `SELECT COUNT(DISTINCT "productId")::text AS total
+         FROM inventory_items
+         WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL`,
+        [tenantId],
+      ),
+    ]);
+    const totalProducts = Number(totalRows[0]?.total ?? 0);
     const w = Object.fromEntries(s.widgets.map((w) => [w.key, w.count]));
     const toolResult = {
       ...Object.fromEntries(s.widgets.map((w) => [w.key, { count: w.count, label: w.titleAr }])),
+      totalProducts,
       expiryRiskEgp:     s.expiryRiskEgp,
       pendingApprovals:  s.pendingApprovals.total,
       criticalApprovals: s.pendingApprovals.critical,
@@ -436,8 +446,8 @@ export class ChatService {
     const cards: ResponseCard[] = [{
       type: 'kpi_row',
       items: [
-        { label: 'إجمالي المنتجات', value: String(w['total_items'] ?? 0),           color: 'blue' },
-        { label: 'مخزون منخفض',    value: String(w['low_stock'] ?? 0),              color: (w['low_stock'] ?? 0) > 0 ? 'amber' : 'emerald' },
+        { label: 'إجمالي المنتجات', value: String(totalProducts),                    color: 'blue' },
+        { label: 'مخزون منخفض',    value: String(w['stock_risk'] ?? 0),             color: (w['stock_risk'] ?? 0) > 0 ? 'amber' : 'emerald' },
         { label: 'قيمة في خطر',    value: fmtEgp(s.expiryRiskEgp ?? 0),            color: (s.expiryRiskEgp ?? 0) > 0 ? 'red' : 'emerald' },
         { label: 'مهام معلقة',     value: String(s.pendingApprovals?.total ?? 0),   color: (s.pendingApprovals?.total ?? 0) > 0 ? 'amber' : 'emerald' },
       ],

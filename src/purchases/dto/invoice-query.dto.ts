@@ -1,4 +1,4 @@
-import { IsEnum, IsNumberString, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsDateString, IsEnum, IsNumberString, IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class InvoiceQueryDto {
   @IsOptional() @IsString()
@@ -13,10 +13,10 @@ export class InvoiceQueryDto {
   @IsOptional() @IsUUID()
   supplierId?: string;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsDateString()
   dateFrom?: string;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsDateString()
   dateTo?: string;
 
   @IsOptional() @IsNumberString()
@@ -36,10 +36,10 @@ export class ReturnQueryDto {
   @IsOptional() @IsUUID()
   supplierId?: string;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsDateString()
   dateFrom?: string;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsDateString()
   dateTo?: string;
 
   @IsOptional() @IsNumberString()

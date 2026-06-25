@@ -55,6 +55,13 @@ export class ProductBatch {
   @Column({ type: 'date', nullable: true })
   expiryDate: Date;
 
+  /**
+   * When true: product has no expiry date (medical devices, gloves, syringes, consumables).
+   * Expiry alert cron and FEFO rotation must skip batches where noExpiry = true.
+   */
+  @Column({ type: 'boolean', default: false })
+  noExpiry: boolean;
+
   /** Units currently on hand from this lot. Decreases as the lot is consumed. */
   @Column({ type: 'int', default: 0 })
   quantity: number;

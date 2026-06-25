@@ -81,6 +81,9 @@ export class PurchaseInvoice {
   @Column({ type: 'uuid', nullable: true })
   cancelledBy: string;
 
+  @Column({ type: 'varchar', length: 20, default: 'manual' })
+  source: 'manual' | 'ai';
+
   @Column({ type: 'timestamp', nullable: true })
   deletedAt: Date;
 

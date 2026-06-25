@@ -7,7 +7,9 @@ import {
   ParseUUIDPipe,
   DefaultValuePipe,
   ParseIntPipe,
+  ForbiddenException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -51,6 +53,7 @@ export class AnalyticsController {
   }
 
   @Get('sales/summary')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Roles(Role.PHARMACY_ADMIN)
   @AuditRead('sales_summary_report')
   @ApiOperation({ summary: 'Aggregated daily, weekly, or monthly sales summary with COGS and margin' })
@@ -80,6 +83,7 @@ export class AnalyticsController {
   }
 
   @Get('sales/by-product')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Roles(Role.PHARMACY_ADMIN)
   @AuditRead('sales_by_product_report')
   @ApiOperation({ summary: 'Sales breakdown by product per day with COGS and margin' })
@@ -102,6 +106,7 @@ export class AnalyticsController {
   }
 
   @Get('sales/by-category')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Roles(Role.PHARMACY_ADMIN)
   @AuditRead('sales_by_category_report')
   @ApiOperation({ summary: 'Sales breakdown by category per day with COGS and margin' })
@@ -128,6 +133,7 @@ export class AnalyticsController {
   }
 
   @Get('inventory/current')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Roles(Role.PHARMACY_ADMIN)
   @AuditRead('inventory_report')
   @ApiOperation({ summary: 'Current inventory snapshot with cost/sell values, expiry status and discount stats' })
@@ -208,7 +214,14 @@ export class AnalyticsController {
   })
   @ApiQuery({ name: 'productId', required: true })
   @ApiOkResponse()
-  getRegionalPricing(@Query('productId', ParseUUIDPipe) productId: string) {
+  getRegionalPricing(
+    @CurrentUser() user: any,
+    @Query('productId', ParseUUIDPipe) productId: string,
+  ) {
+    // SUPPLIER_ADMIN can only see pricing in context of their own tenant
+    if (user.role === Role.SUPPLIER_ADMIN) {
+      return this.svc.getRegionalPricingForSupplier(productId, user.tenantId);
+    }
     return this.svc.getRegionalPricing(productId);
   }
 
@@ -224,10 +237,15 @@ export class AnalyticsController {
   @ApiQuery({ name: 'days',             required: false, schema: { default: 90 } })
   @ApiOkResponse()
   getPriceTrend(
+    @CurrentUser() user: any,
     @Query('productId',        ParseUUIDPipe) productId: string,
     @Query('supplierTenantId', ParseUUIDPipe) supplierTenantId: string,
     @Query('days', new DefaultValuePipe(90), ParseIntPipe) days: number,
   ) {
+    // SUPPLIER_ADMIN can only query trend for their own tenant
+    if (user.role === Role.SUPPLIER_ADMIN && supplierTenantId !== user.tenantId) {
+      throw new ForbiddenException('You can only view pricing trends for your own supplier account');
+    }
     return this.svc.getPriceTrend(supplierTenantId, productId, Math.min(days, 365));
   }
 }

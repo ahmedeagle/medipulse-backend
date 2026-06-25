@@ -167,6 +167,42 @@ export class Product {
   @Column({ type: 'boolean', default: false })
   requiresPrescription: boolean;
 
+  // ── Pricing & Tax ─────────────────────────────────────────────────────────
+
+  /** VAT / tax rate percentage. 0 = tax-exempt. Applied on POS receipt and purchase invoice lines. */
+  @Column({ type: 'decimal', precision: 5, scale: 2, default: 0 })
+  taxRate: number;
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  /** False = product is discontinued — hidden from POS & purchase order searches. */
+  @Column({ type: 'boolean', default: true })
+  isActive: boolean;
+
+  // ── Behaviour Toggles (Aumet parity) ─────────────────────────────────────
+
+  /** When true, product cannot be sold at POS (internal-use only). */
+  @Column({ type: 'boolean', default: false })
+  disablePOSSale: boolean;
+
+  /** When true, product is blocked from purchase orders. */
+  @Column({ type: 'boolean', default: false })
+  disablePurchase: boolean;
+
+  /** Whether this product is eligible for customer return/refund. */
+  @Column({ type: 'boolean', default: true })
+  returnable: boolean;
+
+  /** Whether a discount can be applied at POS checkout. */
+  @Column({ type: 'boolean', default: true })
+  discountAllowed: boolean;
+
+  // ── F-08: Product image ────────────────────────────────────────────────────
+
+  /** Public URL of the product image (JPG/PNG, max 2MB). Stored in /uploads/products/. */
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  imageUrl: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

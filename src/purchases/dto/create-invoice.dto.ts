@@ -1,7 +1,7 @@
 import {
   IsArray, IsEnum, IsNotEmpty, IsNumber,
   IsOptional, IsString, IsUUID, IsDateString,
-  Min, Max, ValidateNested, IsBoolean,
+  Min, Max, MaxLength, ValidateNested, IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -53,10 +53,10 @@ export class CreateInvoiceDto {
   @IsOptional() @IsUUID()
   supplierTenantId?: string;
 
-  @IsString() @IsNotEmpty()
+  @IsString() @IsNotEmpty() @MaxLength(200)
   supplierName: string;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsString() @MaxLength(100)
   supplierInvoiceNumber?: string;
 
   @IsOptional() @IsDateString()
@@ -71,7 +71,7 @@ export class CreateInvoiceDto {
   @IsOptional() @IsNumber() @Min(0)
   discountValue?: number;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsString() @MaxLength(2000)
   notes?: string;
 
   @IsArray() @ValidateNested({ each: true })

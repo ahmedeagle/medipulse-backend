@@ -5,6 +5,7 @@ import { Repository, LessThan } from 'typeorm';
 import { ProductBatch, BatchStatus } from './entities/product-batch.entity';
 import { InventoryService } from './inventory.service';
 import { NotificationService } from '../notifications/notification.service';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 @Injectable()
 export class ExpiredInventoryCron {
@@ -15,6 +16,7 @@ export class ExpiredInventoryCron {
     private readonly batchRepo: Repository<ProductBatch>,
     private readonly inventoryService: InventoryService,
     private readonly notificationService: NotificationService,
+    private readonly settingsSvc: PharmacySettingsService,
   ) {}
 
   // Runs every day at 6:00 AM UTC
@@ -26,18 +28,22 @@ export class ExpiredInventoryCron {
     today.setHours(0, 0, 0, 0);
 
     // 1. Auto-transition active batches that passed expiry to status = 'expired'
-    const expiredBatches = await this.batchRepo.find({
-      where: {
-        status: 'active' as BatchStatus,
-        expiryDate: LessThan(today),
-      },
-    });
+    // Guard: skip batches where noExpiry = true (medical devices, consumables)
+    const expiredBatches = await this.batchRepo
+      .createQueryBuilder('b')
+      .where('b.status = :status', { status: 'active' })
+      .andWhere('b."expiryDate" < :today', { today })
+      .andWhere('(b."noExpiry" = false OR b."noExpiry" IS NULL)')
+      .getMany();
 
     if (expiredBatches.length > 0) {
-      await this.batchRepo.update(
-        { status: 'active' as BatchStatus, expiryDate: LessThan(today) },
-        { status: 'expired' as BatchStatus },
-      );
+      const ids = expiredBatches.map((b) => b.id);
+      await this.batchRepo
+        .createQueryBuilder()
+        .update()
+        .set({ status: 'expired' as BatchStatus })
+        .whereInIds(ids)
+        .execute();
       this.logger.log(`Auto-expired ${expiredBatches.length} batch(es)`);
     }
 
@@ -60,13 +66,15 @@ export class ExpiredInventoryCron {
         .filter(Boolean)
         .join('، ');
 
-      await this.notificationService.create({
-        tenantId,
-        type: 'expired_stock',
-        title: `⛔ ${count} منتج منتهي الصلاحية في المخزون`,
-        body: `${names}${count > 3 ? ` و${count - 3} آخرين` : ''} — يجب إزالتهم من المخزون فوراً لتجنب المخالفات التنظيمية`,
-        resourceRef: '/pharmacy/inventory?filter=expired',
-      });
+      if (await this.settingsSvc.getNotifFlag(tenantId, 'enableExpiryAlerts')) {
+        await this.notificationService.create({
+          tenantId,
+          type: 'expired_stock',
+          title: `⛔ ${count} منتج منتهي الصلاحية في المخزون`,
+          body: `${names}${count > 3 ? ` و${count - 3} آخرين` : ''} — يجب إزالتهم من المخزون فوراً لتجنب المخالفات التنظيمية`,
+          resourceRef: '/pharmacy/inventory?filter=expired',
+        });
+      }
 
       this.logger.log(`Sent expired-stock alert to tenant ${tenantId}: ${count} items`);
     }

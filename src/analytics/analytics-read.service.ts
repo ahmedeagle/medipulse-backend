@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { PriceSnapshot } from './entities/price-snapshot.entity';
@@ -6,6 +6,11 @@ import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { SupplierProfile } from '../supplier/entities/supplier-profile.entity';
 import { WeeklyAnalyticsSnapshot } from './entities/weekly-analytics-snapshot.entity';
+
+export interface Paginated<T> {
+  data: T[];
+  total: number;
+}
 
 export interface SalesSummaryRow {
   period:               string;
@@ -48,6 +53,24 @@ export interface ProductSalesRow {
   cogs:               number;
   grossMargin:        number;
   grossMarginPct:     number;
+  qtyReturned:        number;
+  avgInvoiceValue:    number;
+}
+
+export interface CategorySalesRow {
+  category:            string;
+  saleDate:            string;
+  qtySold:             number;
+  qtyReturned:         number;
+  invoiceCount:        number;
+  totalDiscounts:      number;
+  totalSales:          number;
+  salesBeforeDiscount: number;
+  totalReturns:        number;
+  netSales:            number;
+  cogs:                number;
+  grossMargin:         number;
+  grossMarginPct:      number;
 }
 
 export interface InventoryReportRow {
@@ -127,6 +150,8 @@ export interface RegionalPrice {
 
 @Injectable()
 export class AnalyticsReadService {
+  private readonly logger = new Logger(AnalyticsReadService.name);
+
   constructor(
     @InjectRepository(PriceSnapshot)
     private readonly priceSnapshotRepo: Repository<PriceSnapshot>,
@@ -328,9 +353,12 @@ export class AnalyticsReadService {
       dateFrom: string;
       dateTo: string;
       cashierName?: string;
+      hideZeroRows?: boolean;
+      page?: number;
+      pageSize?: number;
     },
-  ): Promise<SalesSummaryRow[]> {
-    const { granularity, dateFrom, dateTo, cashierName } = params;
+  ): Promise<Paginated<SalesSummaryRow>> {
+    const { granularity, dateFrom, dateTo, cashierName, hideZeroRows = false } = params;
 
     let trunc: string, fmt: string;
     switch (granularity) {
@@ -339,10 +367,13 @@ export class AnalyticsReadService {
       default:        trunc = 'day';   fmt = 'YYYY-MM-DD';
     }
 
-    // Shift dateTo to be exclusive (include the full last day)
     const dateToExclusive = new Date(dateTo);
     dateToExclusive.setDate(dateToExclusive.getDate() + 1);
     const dateToStr = dateToExclusive.toISOString().split('T')[0];
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
 
     const bindings: any[] = [tenantId, dateFrom, dateToStr];
     let cashierFilter = '';
@@ -355,15 +386,18 @@ export class AnalyticsReadService {
         )`;
     }
 
+    const havingClause = hideZeroRows
+      ? `HAVING SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) > 0`
+      : '';
+
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
+
     const rows: any[] = await this.dataSource.query(`
       WITH filtered_tx AS (
         SELECT
-          id,
-          type,
-          subtotal,
-          "discountAmount",
-          "taxAmount",
-          "totalAmount",
+          id, type, subtotal, "discountAmount", "taxAmount", "totalAmount",
           DATE_TRUNC('${trunc}', "createdAt") AS period
         FROM pos_transactions
         WHERE "pharmacyTenantId" = $1
@@ -382,35 +416,37 @@ export class AnalyticsReadService {
         GROUP BY ti."transactionId"
       ),
       period_data AS (
-        SELECT
-          f.period,
-          f.type,
-          f.subtotal,
-          f."discountAmount",
-          f."taxAmount",
-          f."totalAmount",
-          COALESCE(c.cogs, 0) AS cogs
+        SELECT f.period, f.type, f.subtotal, f."discountAmount", f."taxAmount",
+               f."totalAmount", COALESCE(c.cogs, 0) AS cogs
         FROM filtered_tx f
         LEFT JOIN tx_cogs c ON c."transactionId" = f.id
+      ),
+      summary AS (
+        SELECT
+          TO_CHAR(period, '${fmt}') AS period,
+          ROUND(SUM(CASE WHEN type = 'sale' THEN subtotal + "discountAmount" ELSE 0 END)::numeric, 2) AS "salesBeforeDiscount",
+          ROUND(SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalSales",
+          ROUND(SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalReturns",
+          ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END))::numeric, 2) AS "netSales",
+          COUNT(CASE WHEN type = 'sale' THEN 1 END)::int AS "invoiceCount",
+          ROUND(COALESCE(AVG(CASE WHEN type = 'sale' THEN "totalAmount" END), 0)::numeric, 2) AS "avgInvoice",
+          ROUND(SUM(CASE WHEN type = 'sale' THEN "discountAmount" ELSE 0 END)::numeric, 2) AS "totalDiscounts",
+          ROUND(SUM(CASE WHEN type = 'sale' THEN "taxAmount" ELSE 0 END)::numeric, 2) AS "totalTax",
+          ROUND(SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END)::numeric, 2) AS "cogs",
+          ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END))::numeric, 2) AS "grossMargin"
+        FROM period_data
+        GROUP BY period
+        ${havingClause}
       )
-      SELECT
-        TO_CHAR(period, '${fmt}') AS period,
-        ROUND(SUM(CASE WHEN type = 'sale' THEN subtotal + "discountAmount" ELSE 0 END)::numeric, 2) AS "salesBeforeDiscount",
-        ROUND(SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalSales",
-        ROUND(SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END)::numeric, 2) AS "totalReturns",
-        ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'return' THEN "totalAmount" ELSE 0 END))::numeric, 2) AS "netSales",
-        COUNT(CASE WHEN type = 'sale' THEN 1 END)::int AS "invoiceCount",
-        ROUND(COALESCE(AVG(CASE WHEN type = 'sale' THEN "totalAmount" END), 0)::numeric, 2) AS "avgInvoice",
-        ROUND(SUM(CASE WHEN type = 'sale' THEN "discountAmount" ELSE 0 END)::numeric, 2) AS "totalDiscounts",
-        ROUND(SUM(CASE WHEN type = 'sale' THEN "taxAmount" ELSE 0 END)::numeric, 2) AS "totalTax",
-        ROUND(SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END)::numeric, 2) AS "cogs",
-        ROUND((SUM(CASE WHEN type = 'sale' THEN "totalAmount" ELSE 0 END) - SUM(CASE WHEN type = 'sale' THEN cogs ELSE 0 END))::numeric, 2) AS "grossMargin"
-      FROM period_data
-      GROUP BY period
-      ORDER BY period
+      SELECT COUNT(*) OVER() AS _total, summary.*
+      FROM summary
+      ORDER BY summary.period
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `, bindings);
 
-    return rows.map(r => {
+    const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+
+    const data = rows.map(r => {
       const netSales    = Number(r.netSales);
       const grossMargin = Number(r.grossMargin);
       const base: SalesSummaryRow = {
@@ -435,11 +471,9 @@ export class AnalyticsReadService {
         base.monthStart  = `${r.period}-01`;
         base.monthEnd    = `${r.period}-${String(lastDay).padStart(2, '0')}`;
       } else if (granularity === 'weekly') {
-        // period format: "2025-W22" — derive start/end from ISO week
         const [isoYear, weekPart] = r.period.split('-W');
         const wn = parseInt(weekPart, 10);
         const yr = parseInt(isoYear, 10);
-        // ISO week 1 = week containing first Thursday; Monday = day 1
         const jan4 = new Date(yr, 0, 4);
         const startOfW1 = new Date(jan4);
         startOfW1.setDate(jan4.getDate() - ((jan4.getDay() + 6) % 7));
@@ -454,6 +488,8 @@ export class AnalyticsReadService {
       }
       return base;
     });
+
+    return { data, total };
   }
 
   // ─── Sales by Product ─────────────────────────────────────────────────────
@@ -465,13 +501,19 @@ export class AnalyticsReadService {
       dateTo: string;
       search?: string;
       category?: string;
+      page?: number;
+      pageSize?: number;
     },
-  ): Promise<ProductSalesRow[]> {
+  ): Promise<Paginated<ProductSalesRow>> {
     const { dateFrom, dateTo, search, category } = params;
 
     const dateToExclusive = new Date(dateTo);
     dateToExclusive.setDate(dateToExclusive.getDate() + 1);
     const dateToStr = dateToExclusive.toISOString().split('T')[0];
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
 
     const bindings: any[] = [tenantId, dateFrom, dateToStr];
     let extraWhere = '';
@@ -485,72 +527,87 @@ export class AnalyticsReadService {
       extraWhere += ` AND (COALESCE(p.sku, '') ILIKE $${bindings.length} OR COALESCE(p.name, '') ILIKE $${bindings.length} OR ti."productName" ILIKE $${bindings.length})`;
     }
 
-    const rows: any[] = await this.dataSource.query(`
-      SELECT
-        COALESCE(p.sku, '')                               AS "productCode",
-        COALESCE(p.name, ti."productName", '')            AS "productName",
-        COALESCE(p.category, '')                          AS "category",
-        TO_CHAR(DATE(tx."createdAt"), 'YYYY-MM-DD')       AS "saleDate",
-        SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::int
-                                                          AS "qtySold",
-        ROUND(
-          SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::numeric /
-          NULLIF(COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END), 0),
-          4
-        )                                                 AS "avgQtyPerInvoice",
-        COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END)::int
-                                                          AS "invoiceCount",
-        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti."discountAmount" ELSE 0 END)::numeric, 2)
-                                                          AS "totalDiscounts",
-        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END)::numeric, 2)
-                                                          AS "totalSales",
-        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN (ti."unitPrice" * ti.quantity) ELSE 0 END)::numeric, 2)
-                                                          AS "salesBeforeDiscount",
-        ROUND(SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END)::numeric, 2)
-                                                          AS "totalReturns",
-        ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
-               SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END))::numeric, 2)
-                                                          AS "netSales",
-        0::numeric                                        AS "totalTax",
-        ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END)::numeric, 2)
-                                                          AS "cogs",
-        ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
-               SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END))::numeric, 2)
-                                                          AS "grossMargin"
-      FROM pos_transaction_items ti
-      JOIN pos_transactions tx         ON tx.id  = ti."transactionId"
-      LEFT JOIN products p             ON p.id   = ti."productId"
-      LEFT JOIN inventory_items inv    ON inv.id = ti."inventoryItemId"
-      WHERE tx."pharmacyTenantId" = $1
-        AND tx.status = 'completed'
-        AND tx."createdAt" >= $2::date
-        AND tx."createdAt" < $3::date
-        ${extraWhere}
-      GROUP BY ti."productId", p.id, p.sku, p.name, p.category, DATE(tx."createdAt")
-      ORDER BY DATE(tx."createdAt") DESC, "netSales" DESC
-    `, bindings);
-    console.log('[SalesByProduct] tenantId=%s dateFrom=%s dateTo=%s rows=%d', tenantId, dateFrom, dateToStr, rows.length);
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
 
-    return rows.map(r => ({
-      productCode:         r.productCode        ?? '',
-      productName:         r.productName        ?? '',
-      category:            r.category           ?? '',
-      saleDate:            r.saleDate,
-      qtySold:             Number(r.qtySold),
-      avgQtyPerInvoice:    Number(r.avgQtyPerInvoice),
-      invoiceCount:        Number(r.invoiceCount),
-      totalDiscounts:      Number(r.totalDiscounts),
-      totalSales:          Number(r.totalSales),
-      salesBeforeDiscount: Number(r.salesBeforeDiscount),
-      totalReturns:        Number(r.totalReturns),
-      netSales:            Number(r.netSales),
-      totalTax:            0,
-      cogs:                Number(r.cogs),
-      grossMargin:         Number(r.grossMargin),
-      grossMarginPct:      Number(r.netSales) > 0
-        ? Math.round((Number(r.grossMargin) / Number(r.netSales)) * 1000) / 10
-        : 0,
-    }));
+    try {
+      const rows: any[] = await this.dataSource.query(`
+        WITH base AS (
+          SELECT
+            COALESCE(p.sku, '')                               AS "productCode",
+            COALESCE(p.name, ti."productName", '')            AS "productName",
+            COALESCE(p.category, '')                          AS "category",
+            TO_CHAR(DATE(tx."createdAt"), 'YYYY-MM-DD')       AS "saleDate",
+            SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::int AS "qtySold",
+            ROUND(
+              SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity ELSE 0 END)::numeric /
+              NULLIF(COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END), 0),
+              4
+            )                                                 AS "avgQtyPerInvoice",
+            COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END)::int AS "invoiceCount",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti."discountAmount" ELSE 0 END)::numeric, 2) AS "totalDiscounts",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END)::numeric, 2) AS "totalSales",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN (ti."unitPrice" * ti.quantity) ELSE 0 END)::numeric, 2) AS "salesBeforeDiscount",
+            ROUND(SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END)::numeric, 2) AS "totalReturns",
+            SUM(CASE WHEN tx.type = 'return' THEN ti.quantity ELSE 0 END)::int AS "qtyReturned",
+            ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
+                   SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END))::numeric, 2) AS "netSales",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END)::numeric, 2) AS "cogs",
+            ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
+                   SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END))::numeric, 2) AS "grossMargin"
+          FROM pos_transaction_items ti
+          JOIN pos_transactions tx      ON tx.id  = ti."transactionId"
+          LEFT JOIN products p          ON p.id   = ti."productId"
+          LEFT JOIN inventory_items inv ON inv.id = ti."inventoryItemId"
+          WHERE tx."pharmacyTenantId" = $1
+            AND tx.status = 'completed'
+            AND tx."createdAt" >= $2::date
+            AND tx."createdAt" < $3::date
+            ${extraWhere}
+          GROUP BY ti."productId", ti."productName", p.id, p.sku, p.name, p.category, DATE(tx."createdAt")
+        )
+        SELECT COUNT(*) OVER() AS _total, base.*
+        FROM base
+        ORDER BY base."saleDate" DESC, base."netSales" DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `, bindings);
+
+      const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+      const data = rows.map(r => ({
+        productCode:         r.productCode        ?? '',
+        productName:         r.productName        ?? '',
+        category:            r.category           ?? '',
+        saleDate:            r.saleDate,
+        qtySold:             Number(r.qtySold),
+        avgQtyPerInvoice:    Number(r.avgQtyPerInvoice),
+        invoiceCount:        Number(r.invoiceCount),
+        totalDiscounts:      Number(r.totalDiscounts),
+        totalSales:          Number(r.totalSales),
+        salesBeforeDiscount: Number(r.salesBeforeDiscount),
+        totalReturns:        Number(r.totalReturns),
+        netSales:            Number(r.netSales),
+        totalTax:            0,
+        cogs:                Number(r.cogs),
+        grossMargin:         Number(r.grossMargin),
+        grossMarginPct:      Number(r.netSales) > 0
+          ? Math.round((Number(r.grossMargin) / Number(r.netSales)) * 1000) / 10
+          : 0,
+        qtyReturned:         Number(r.qtyReturned),
+        avgInvoiceValue:     Number(r.invoiceCount) > 0
+          ? Math.round((Number(r.netSales) / Number(r.invoiceCount)) * 100) / 100
+          : 0,
+      }));
+
+      return { data, total };
+    } catch (err) {
+      this.logger.error(
+        `getSalesByProduct FAILED — tenant=${tenantId} dateFrom=${dateFrom} dateTo=${dateTo}`,
+        err?.message,
+        err?.stack,
+      );
+      throw err;
+    }
   }
 
   // ─── Sales-by-Product Diagnostic ─────────────────────────────────────────
@@ -581,6 +638,105 @@ export class AnalyticsReadService {
     return { txCount: txCount.total, tiCount: tiCount.total, matchedProducts: matchedProducts.total, dateRange };
   }
 
+  // ─── Sales-by-Category Report ─────────────────────────────────────────────
+
+  async getSalesByCategory(
+    tenantId: string,
+    params: {
+      dateFrom: string;
+      dateTo: string;
+      category?: string;
+      page?: number;
+      pageSize?: number;
+    },
+  ): Promise<Paginated<CategorySalesRow>> {
+    const { dateFrom, dateTo, category } = params;
+
+    const dateToExclusive = new Date(dateTo);
+    dateToExclusive.setDate(dateToExclusive.getDate() + 1);
+    const dateToStr = dateToExclusive.toISOString().split('T')[0];
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
+
+    const bindings: any[] = [tenantId, dateFrom, dateToStr];
+    let extraWhere = '';
+
+    if (category) {
+      bindings.push(category);
+      extraWhere += ` AND COALESCE(p.category, '') = $${bindings.length}`;
+    }
+
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
+
+    try {
+      const rows: any[] = await this.dataSource.query(`
+        WITH base AS (
+          SELECT
+            COALESCE(p.category, 'بدون فئة')                         AS "category",
+            TO_CHAR(DATE(tx."createdAt"), 'YYYY-MM-DD')               AS "saleDate",
+            SUM(CASE WHEN tx.type = 'sale'   THEN ti.quantity ELSE 0 END)::int AS "qtySold",
+            SUM(CASE WHEN tx.type = 'return' THEN ti.quantity ELSE 0 END)::int AS "qtyReturned",
+            COUNT(DISTINCT CASE WHEN tx.type = 'sale' THEN tx.id END)::int     AS "invoiceCount",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti."discountAmount" ELSE 0 END)::numeric, 2) AS "totalDiscounts",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END)::numeric, 2) AS "totalSales",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN (ti."unitPrice" * ti.quantity) ELSE 0 END)::numeric, 2) AS "salesBeforeDiscount",
+            ROUND(SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END)::numeric, 2) AS "totalReturns",
+            ROUND((SUM(CASE WHEN tx.type = 'sale'   THEN ti.subtotal ELSE 0 END) -
+                   SUM(CASE WHEN tx.type = 'return' THEN ti.subtotal ELSE 0 END))::numeric, 2) AS "netSales",
+            ROUND(SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END)::numeric, 2) AS "cogs",
+            ROUND((SUM(CASE WHEN tx.type = 'sale' THEN ti.subtotal ELSE 0 END) -
+                   SUM(CASE WHEN tx.type = 'sale' THEN ti.quantity * COALESCE(inv."costPrice", 0) ELSE 0 END))::numeric, 2) AS "grossMargin"
+          FROM pos_transaction_items ti
+          JOIN pos_transactions tx      ON tx.id  = ti."transactionId"
+          LEFT JOIN products p          ON p.id   = ti."productId"
+          LEFT JOIN inventory_items inv ON inv.id = ti."inventoryItemId"
+          WHERE tx."pharmacyTenantId" = $1
+            AND tx.status = 'completed'
+            AND tx."createdAt" >= $2::date
+            AND tx."createdAt" < $3::date
+            ${extraWhere}
+          GROUP BY COALESCE(p.category, 'بدون فئة'), DATE(tx."createdAt")
+        )
+        SELECT COUNT(*) OVER() AS _total, base.*
+        FROM base
+        ORDER BY base."saleDate" DESC, base."netSales" DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `, bindings);
+
+      const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+      const data = rows.map(r => ({
+        category:            r.category            ?? '',
+        saleDate:            r.saleDate,
+        qtySold:             Number(r.qtySold),
+        qtyReturned:         Number(r.qtyReturned),
+        invoiceCount:        Number(r.invoiceCount),
+        totalDiscounts:      Number(r.totalDiscounts),
+        totalSales:          Number(r.totalSales),
+        salesBeforeDiscount: Number(r.salesBeforeDiscount),
+        totalReturns:        Number(r.totalReturns),
+        netSales:            Number(r.netSales),
+        cogs:                Number(r.cogs),
+        grossMargin:         Number(r.grossMargin),
+        grossMarginPct:      Number(r.netSales) > 0
+          ? Math.round((Number(r.grossMargin) / Number(r.netSales)) * 1000) / 10
+          : 0,
+      }));
+
+      return { data, total };
+    } catch (err) {
+      this.logger.error(
+        `getSalesByCategory FAILED — tenant=${tenantId} dateFrom=${dateFrom} dateTo=${dateTo}`,
+        err?.message,
+        err?.stack,
+      );
+      throw err;
+    }
+  }
+
   // ─── Pharmacy Dashboard Analytics ─────────────────────────────────────────
 
   async getWeeklySnapshots(tenantId: string, weeks = 12): Promise<WeeklyAnalyticsSnapshot[]> {
@@ -596,9 +752,13 @@ export class AnalyticsReadService {
 
   async getInventoryReport(
     tenantId: string,
-    params: { search?: string; category?: string; status?: string },
-  ): Promise<InventoryReportRow[]> {
+    params: { search?: string; category?: string; status?: string; page?: number; pageSize?: number },
+  ): Promise<Paginated<InventoryReportRow>> {
     const { search, category, status } = params;
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(5000, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
 
     const bindings: any[] = [tenantId];
     let extraWhere = '';
@@ -611,6 +771,21 @@ export class AnalyticsReadService {
       bindings.push(`%${search}%`);
       extraWhere += ` AND (COALESCE(p.sku, '') ILIKE $${bindings.length} OR COALESCE(p.name, '') ILIKE $${bindings.length} OR COALESCE(p.barcode, '') ILIKE $${bindings.length})`;
     }
+
+    let statusWhere = '';
+    if (status === 'expired') {
+      statusWhere = `WHERE computed_status = 'expired'`;
+    } else if (status === 'near_expiry') {
+      statusWhere = `WHERE computed_status = 'near_expiry'`;
+    } else if (status === 'low_stock') {
+      statusWhere = `WHERE computed_status = 'low_stock'`;
+    } else if (status === 'active') {
+      statusWhere = `WHERE computed_status = 'active'`;
+    }
+
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
 
     const rows: any[] = await this.dataSource.query(`
       WITH discount_stats AS (
@@ -632,59 +807,49 @@ export class AnalyticsReadService {
           AND tx.type    = 'sale'
           AND tx."createdAt" >= CURRENT_DATE - INTERVAL '90 days'
         GROUP BY ti."productId"
+      ),
+      inventory_base AS (
+        SELECT
+          COALESCE(p.sku, '')      AS "productCode",
+          COALESCE(p.name, '')     AS "productName",
+          COALESCE(p.barcode, '')  AS "barcode",
+          COALESCE(p.category, '') AS "category",
+          SUM(i.quantity)::int     AS "stockQty",
+          ROUND(SUM(i.quantity * COALESCE(i."costPrice",    0))::numeric, 2) AS "costValue",
+          ROUND(SUM(i.quantity * COALESCE(i."sellingPrice", 0))::numeric, 2) AS "sellValue",
+          SUM(CASE WHEN i."expiryDate" IS NULL OR i."expiryDate" > CURRENT_DATE + 90 THEN i.quantity ELSE 0 END)::int AS "availableForSale",
+          SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" > CURRENT_DATE AND i."expiryDate" <= CURRENT_DATE + 90 THEN i.quantity ELSE 0 END)::int AS "nearExpiryQty",
+          SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE THEN i.quantity ELSE 0 END)::int AS "expiredQty",
+          ROUND(AVG(COALESCE(i."costPrice",    0))::numeric, 2) AS "avgCostPrice",
+          ROUND(AVG(COALESCE(i."sellingPrice", 0))::numeric, 2) AS "avgSellPrice",
+          CASE
+            WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE THEN 1 ELSE 0 END) > 0 THEN 'expired'
+            WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" > CURRENT_DATE AND i."expiryDate" <= CURRENT_DATE + 90 THEN 1 ELSE 0 END) > 0 THEN 'near_expiry'
+            WHEN SUM(i.quantity) <= MIN(i."minThreshold") THEN 'low_stock'
+            ELSE 'active'
+          END AS computed_status,
+          ROUND(COALESCE(MAX(d."avgDiscount"), 0)::numeric, 2) AS "avgDiscount",
+          ROUND(COALESCE(MAX(d."minDiscount"), 0)::numeric, 2) AS "minDiscount",
+          ROUND(COALESCE(MAX(d."maxDiscount"), 0)::numeric, 2) AS "maxDiscount",
+          ROUND(AVG(COALESCE(i."sellingPrice", 0) - COALESCE(i."costPrice", 0))::numeric, 2) AS "avgProfitPerUnit",
+          SUM(i.quantity * COALESCE(i."sellingPrice", 0)) AS _sort_val
+        FROM inventory_items i
+        LEFT JOIN products p       ON p.id = i."productId"
+        LEFT JOIN discount_stats d ON d."productId" = i."productId"
+        WHERE i."pharmacyTenantId" = $1
+          AND i."deletedAt" IS NULL
+          ${extraWhere}
+        GROUP BY i."productId", p.id, p.sku, p.name, p.barcode, p.category
       )
-      SELECT
-        COALESCE(p.sku, '')          AS "productCode",
-        COALESCE(p.name, '')         AS "productName",
-        COALESCE(p.barcode, '')      AS "barcode",
-        COALESCE(p.category, '')     AS "category",
-        SUM(i.quantity)::int     AS "stockQty",
-        ROUND(SUM(i.quantity * COALESCE(i."costPrice",    0))::numeric, 2) AS "costValue",
-        ROUND(SUM(i.quantity * COALESCE(i."sellingPrice", 0))::numeric, 2) AS "sellValue",
-        SUM(CASE
-          WHEN i."expiryDate" IS NULL OR i."expiryDate" > CURRENT_DATE + 90
-          THEN i.quantity ELSE 0
-        END)::int AS "availableForSale",
-        SUM(CASE
-          WHEN i."expiryDate" IS NOT NULL
-            AND i."expiryDate" > CURRENT_DATE
-            AND i."expiryDate" <= CURRENT_DATE + 90
-          THEN i.quantity ELSE 0
-        END)::int AS "nearExpiryQty",
-        SUM(CASE
-          WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE
-          THEN i.quantity ELSE 0
-        END)::int AS "expiredQty",
-        ROUND(AVG(COALESCE(i."costPrice",    0))::numeric, 2) AS "avgCostPrice",
-        ROUND(AVG(COALESCE(i."sellingPrice", 0))::numeric, 2) AS "avgSellPrice",
-        CASE
-          WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" <= CURRENT_DATE THEN 1 ELSE 0 END) > 0
-            THEN 'expired'
-          WHEN SUM(CASE WHEN i."expiryDate" IS NOT NULL AND i."expiryDate" > CURRENT_DATE AND i."expiryDate" <= CURRENT_DATE + 90 THEN 1 ELSE 0 END) > 0
-            THEN 'near_expiry'
-          WHEN SUM(i.quantity) <= MIN(i."minThreshold")
-            THEN 'low_stock'
-          ELSE 'active'
-        END AS "status",
-        ROUND(COALESCE(MAX(d."avgDiscount"), 0)::numeric, 2) AS "avgDiscount",
-        ROUND(COALESCE(MAX(d."minDiscount"), 0)::numeric, 2) AS "minDiscount",
-        ROUND(COALESCE(MAX(d."maxDiscount"), 0)::numeric, 2) AS "maxDiscount",
-        0::numeric AS "avgFreeUnits",
-        0::numeric AS "minFreeUnits",
-        0::numeric AS "maxFreeUnits",
-        ROUND(AVG(COALESCE(i."sellingPrice", 0) - COALESCE(i."costPrice", 0))::numeric, 2) AS "avgProfitPerUnit"
-      FROM inventory_items i
-      LEFT JOIN products p         ON p.id = i."productId"
-      LEFT JOIN discount_stats d   ON d."productId" = i."productId"
-      WHERE i."pharmacyTenantId" = $1
-        AND i."deletedAt" IS NULL
-        ${extraWhere}
-      GROUP BY i."productId", p.id, p.sku, p.name, p.barcode, p.category
-      ORDER BY SUM(i.quantity * COALESCE(i."sellingPrice", 0)) DESC
+      SELECT COUNT(*) OVER() AS _total, inventory_base.*
+      FROM inventory_base
+      ${statusWhere}
+      ORDER BY _sort_val DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `, bindings);
-    console.log('[InventoryReport] tenantId=%s rows=%d', tenantId, rows.length);
 
-    const result: InventoryReportRow[] = rows.map(r => ({
+    const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+    const data: InventoryReportRow[] = rows.map(r => ({
       productCode:      r.productCode,
       productName:      r.productName,
       barcode:          r.barcode,
@@ -697,7 +862,7 @@ export class AnalyticsReadService {
       expiredQty:       Number(r.expiredQty),
       avgCostPrice:     Number(r.avgCostPrice),
       avgSellPrice:     Number(r.avgSellPrice),
-      status:           r.status as InventoryReportRow['status'],
+      status:           r.computed_status as InventoryReportRow['status'],
       avgDiscount:      Number(r.avgDiscount),
       minDiscount:      Number(r.minDiscount),
       maxDiscount:      Number(r.maxDiscount),
@@ -707,19 +872,20 @@ export class AnalyticsReadService {
       avgProfitPerUnit: Number(r.avgProfitPerUnit),
     }));
 
-    if (status) {
-      return result.filter(r => r.status === status);
-    }
-    return result;
+    return { data, total };
   }
 
   // ─── Expiry Report ────────────────────────────────────────────────────────
 
   async getExpiryReport(
     tenantId: string,
-    params: { search?: string; category?: string; status?: string; daysAhead?: number; dateFrom?: string; dateTo?: string },
-  ): Promise<ExpiryReportRow[]> {
+    params: { search?: string; category?: string; status?: string; daysAhead?: number; dateFrom?: string; dateTo?: string; page?: number; pageSize?: number },
+  ): Promise<Paginated<ExpiryReportRow>> {
     const { search, category, status, daysAhead, dateFrom, dateTo } = params;
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
 
     const bindings: any[] = [tenantId];
     let extraWhere = '';
@@ -744,8 +910,6 @@ export class AnalyticsReadService {
       bindings.push(daysAhead);
       extraWhere += ` AND i."expiryDate" <= CURRENT_DATE + ($${bindings.length} || ' days')::interval`;
     }
-
-    // status filter: 'expired' | 'near_expiry' (≤90 days) | 'active' (>90 days)
     if (status === 'expired') {
       extraWhere += ` AND i."expiryDate" <= CURRENT_DATE`;
     } else if (status === 'near_expiry') {
@@ -754,32 +918,40 @@ export class AnalyticsReadService {
       extraWhere += ` AND (i."expiryDate" IS NULL OR i."expiryDate" > CURRENT_DATE + INTERVAL '90 days')`;
     }
 
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
+
     const rows: any[] = await this.dataSource.query(`
-      SELECT
-        i.id                                          AS "inventoryItemId",
-        COALESCE(p.sku, '')                           AS "productCode",
-        COALESCE(p.name, '')                          AS "productName",
-        COALESCE(p.barcode, '')                       AS "barcode",
-        COALESCE(i."batchNumber", '')                 AS "batchNumber",
-        TO_CHAR(i."expiryDate", 'YYYY-MM-DD')         AS "expiryDate",
-        (i."expiryDate"::date - CURRENT_DATE)::int    AS "daysUntilExpiry",
-        i.quantity                                    AS "quantity",
-        ROUND(COALESCE(i."costPrice",    0)::numeric, 4) AS "costPrice",
-        ROUND(COALESCE(i."sellingPrice", 0)::numeric, 4) AS "sellingPrice",
-        ROUND((i.quantity * COALESCE(i."costPrice", 0))::numeric, 2) AS "costValue",
-        COALESCE(p.category, '')                      AS "category"
-      FROM inventory_items i
-      LEFT JOIN products p ON p.id = i."productId"
-      WHERE i."pharmacyTenantId" = $1
-        AND i."deletedAt" IS NULL
-        AND i."expiryDate" IS NOT NULL
-        ${extraWhere}
-      ORDER BY i."expiryDate" ASC, i.quantity DESC
+      WITH base AS (
+        SELECT
+          i.id                                             AS "inventoryItemId",
+          COALESCE(p.sku, '')                              AS "productCode",
+          COALESCE(p.name, '')                             AS "productName",
+          COALESCE(p.barcode, '')                          AS "barcode",
+          COALESCE(i."batchNumber", '')                    AS "batchNumber",
+          TO_CHAR(i."expiryDate", 'YYYY-MM-DD')            AS "expiryDate",
+          (i."expiryDate"::date - CURRENT_DATE)::int       AS "daysUntilExpiry",
+          i.quantity                                       AS "quantity",
+          ROUND(COALESCE(i."costPrice",    0)::numeric, 4) AS "costPrice",
+          ROUND(COALESCE(i."sellingPrice", 0)::numeric, 4) AS "sellingPrice",
+          ROUND((i.quantity * COALESCE(i."costPrice", 0))::numeric, 2) AS "costValue",
+          COALESCE(p.category, '')                         AS "category"
+        FROM inventory_items i
+        LEFT JOIN products p ON p.id = i."productId"
+        WHERE i."pharmacyTenantId" = $1
+          AND i."deletedAt" IS NULL
+          AND i."expiryDate" IS NOT NULL
+          ${extraWhere}
+      )
+      SELECT COUNT(*) OVER() AS _total, base.*
+      FROM base
+      ORDER BY base."expiryDate" ASC, base.quantity DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `, bindings);
 
-    console.log('[ExpiryReport] tenantId=%s rows=%d', tenantId, rows.length);
-
-    return rows.map(r => ({
+    const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+    const data = rows.map(r => ({
       inventoryItemId: r.inventoryItemId,
       productCode:     r.productCode,
       productName:     r.productName,
@@ -793,6 +965,8 @@ export class AnalyticsReadService {
       costValue:       Number(r.costValue),
       category:        r.category,
     }));
+
+    return { data, total };
   }
 
   // ─── Data Diagnostic ─────────────────────────────────────────────────────
@@ -824,9 +998,14 @@ export class AnalyticsReadService {
 
   async getInsuranceClaimsReport(
     tenantId: string,
-    params: { dateFrom?: string; dateTo?: string; insuranceCompanyId?: string },
-  ): Promise<InsuranceClaimsRow[]> {
+    params: { dateFrom?: string; dateTo?: string; insuranceCompanyId?: string; page?: number; pageSize?: number },
+  ): Promise<Paginated<InsuranceClaimsRow>> {
     const { dateFrom, dateTo, insuranceCompanyId } = params;
+
+    const page     = Math.max(1, params.page ?? 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize ?? 50));
+    const offset   = (page - 1) * pageSize;
+
     const bindings: any[] = [tenantId];
     let extraWhere = '';
 
@@ -843,47 +1022,47 @@ export class AnalyticsReadService {
       extraWhere += ` AND ic.id = $${bindings.length}`;
     }
 
+    bindings.push(pageSize, offset);
+    const limitIdx  = bindings.length - 1;
+    const offsetIdx = bindings.length;
+
     const rows: any[] = await this.dataSource.query(`
-      SELECT
-        TO_CHAR(tx."createdAt"::date, 'YYYY-MM-DD')                       AS "invoiceDate",
-        ic.name                                                             AS "insuranceCompany",
-        ic.id                                                               AS "insuranceCompanyId",
-        COUNT(DISTINCT tx."customerId")::int                               AS "patientCount",
-        COUNT(DISTINCT tx.id)::int                                         AS "invoiceCount",
-        ROUND(SUM(tx."totalAmount")::numeric, 2)                           AS "totalSales",
-        ROUND(SUM(tx."totalAmount" * (
-          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
-        ))::numeric, 2)                                                    AS "insuranceCoveredAmount",
-        ROUND(SUM(tx."totalAmount" * (
-          COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
-        ))::numeric, 2)                                                    AS "patientDueAmount",
-        ROUND(SUM(tx."totalAmount" * (
-          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
-        ))::numeric, 2)                                                    AS "reimbursementAmount",
-        ROUND(SUM(tx."totalAmount" * (
-          1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0
-        ))::numeric, 2)                                                    AS "pendingAmount"
-      FROM pos_transactions tx
-      JOIN pos_customers c
-        ON c.id = tx."customerId"
-        AND c."pharmacyTenantId" = $1
-        AND c."deletedAt" IS NULL
-        AND c."insuranceCompanyId" IS NOT NULL
-      JOIN insurance_companies ic
-        ON ic.id = c."insuranceCompanyId"
-        AND ic."pharmacyTenantId" = $1
-      WHERE tx."pharmacyTenantId" = $1
-        AND tx.status = 'completed'
-        AND tx.type   = 'sale'
-        AND tx."customerId" IS NOT NULL
-        ${extraWhere}
-      GROUP BY tx."createdAt"::date, ic.id, ic.name
-      ORDER BY tx."createdAt"::date DESC, ic.name ASC
+      WITH base AS (
+        SELECT
+          TO_CHAR(tx."createdAt"::date, 'YYYY-MM-DD')                    AS "invoiceDate",
+          ic.name                                                          AS "insuranceCompany",
+          ic.id                                                            AS "insuranceCompanyId",
+          COUNT(DISTINCT tx."customerId")::int                            AS "patientCount",
+          COUNT(DISTINCT tx.id)::int                                      AS "invoiceCount",
+          ROUND(SUM(tx."totalAmount")::numeric, 2)                        AS "totalSales",
+          ROUND(SUM(tx."totalAmount" * (1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0))::numeric, 2) AS "insuranceCoveredAmount",
+          ROUND(SUM(tx."totalAmount" * (COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0))::numeric, 2) AS "patientDueAmount",
+          ROUND(SUM(tx."totalAmount" * (1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0))::numeric, 2) AS "reimbursementAmount",
+          ROUND(SUM(tx."totalAmount" * (1 - COALESCE(c."copayPercent", ic."patientPercent", 20.0) / 100.0))::numeric, 2) AS "pendingAmount"
+        FROM pos_transactions tx
+        JOIN pos_customers c
+          ON c.id = tx."customerId"
+          AND c."pharmacyTenantId" = $1
+          AND c."deletedAt" IS NULL
+          AND c."insuranceCompanyId" IS NOT NULL
+        JOIN insurance_companies ic
+          ON ic.id = c."insuranceCompanyId"
+          AND ic."pharmacyTenantId" = $1
+        WHERE tx."pharmacyTenantId" = $1
+          AND tx.status = 'completed'
+          AND tx.type   = 'sale'
+          AND tx."customerId" IS NOT NULL
+          ${extraWhere}
+        GROUP BY tx."createdAt"::date, ic.id, ic.name
+      )
+      SELECT COUNT(*) OVER() AS _total, base.*
+      FROM base
+      ORDER BY base."invoiceDate" DESC, base."insuranceCompany" ASC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `, bindings);
 
-    console.log('[InsuranceClaimsReport] tenantId=%s rows=%d', tenantId, rows.length);
-
-    return rows.map(r => ({
+    const total = rows.length > 0 ? Number(rows[0]._total) : 0;
+    const data = rows.map(r => ({
       invoiceDate:            r.invoiceDate ?? '',
       insuranceCompany:       r.insuranceCompany ?? '',
       insuranceCompanyId:     r.insuranceCompanyId,
@@ -895,5 +1074,7 @@ export class AnalyticsReadService {
       reimbursementAmount:    Number(r.reimbursementAmount),
       pendingAmount:          Number(r.pendingAmount),
     }));
+
+    return { data, total };
   }
 }

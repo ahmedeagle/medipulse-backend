@@ -58,15 +58,25 @@ export class AnalyticsController {
   @ApiQuery({ name: 'dateFrom',     required: true,  description: 'ISO date YYYY-MM-DD' })
   @ApiQuery({ name: 'dateTo',       required: true,  description: 'ISO date YYYY-MM-DD (inclusive)' })
   @ApiQuery({ name: 'cashierName',  required: false, description: 'Filter by cashier name (partial, case-insensitive)' })
+  @ApiQuery({ name: 'hideZeroRows', required: false, schema: { default: false } })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
   getSalesSummary(
     @CurrentUser() user: any,
     @Query('granularity')  granularity:  string = 'daily',
     @Query('dateFrom')     dateFrom:     string,
     @Query('dateTo')       dateTo:       string,
     @Query('cashierName')  cashierName?: string,
+    @Query('hideZeroRows') hideZeroRows?: string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
   ) {
     const g = granularity === 'monthly' ? 'monthly' : granularity === 'weekly' ? 'weekly' : 'daily';
-    return this.svc.getSalesSummary(user.tenantId, { granularity: g, dateFrom, dateTo, cashierName });
+    return this.svc.getSalesSummary(user.tenantId, {
+      granularity: g, dateFrom, dateTo, cashierName,
+      hideZeroRows: hideZeroRows === 'true',
+      page, pageSize,
+    });
   }
 
   @Get('sales/by-product')
@@ -77,14 +87,38 @@ export class AnalyticsController {
   @ApiQuery({ name: 'dateTo',    required: true })
   @ApiQuery({ name: 'search',    required: false })
   @ApiQuery({ name: 'category',  required: false })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
   getSalesByProduct(
     @CurrentUser() user: any,
     @Query('dateFrom')  dateFrom:  string,
     @Query('dateTo')    dateTo:    string,
     @Query('search')    search?:   string,
     @Query('category')  category?: string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
   ) {
-    return this.svc.getSalesByProduct(user.tenantId, { dateFrom, dateTo, search, category });
+    return this.svc.getSalesByProduct(user.tenantId, { dateFrom, dateTo, search, category, page, pageSize });
+  }
+
+  @Get('sales/by-category')
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('sales_by_category_report')
+  @ApiOperation({ summary: 'Sales breakdown by category per day with COGS and margin' })
+  @ApiQuery({ name: 'dateFrom',  required: true })
+  @ApiQuery({ name: 'dateTo',    required: true })
+  @ApiQuery({ name: 'category',  required: false })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
+  getSalesByCategory(
+    @CurrentUser() user: any,
+    @Query('dateFrom')  dateFrom:  string,
+    @Query('dateTo')    dateTo:    string,
+    @Query('category')  category?: string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
+  ) {
+    return this.svc.getSalesByCategory(user.tenantId, { dateFrom, dateTo, category, page, pageSize });
   }
 
   @Get('sales/diag')
@@ -100,13 +134,17 @@ export class AnalyticsController {
   @ApiQuery({ name: 'search',   required: false })
   @ApiQuery({ name: 'category', required: false })
   @ApiQuery({ name: 'status',   required: false, enum: ['active', 'near_expiry', 'expired', 'low_stock'] })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
   getInventoryReport(
     @CurrentUser() user: any,
     @Query('search')   search?:   string,
     @Query('category') category?: string,
     @Query('status')   status?:   string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
   ) {
-    return this.svc.getInventoryReport(user.tenantId, { search, category, status });
+    return this.svc.getInventoryReport(user.tenantId, { search, category, status, page, pageSize });
   }
 
   @Get('expiry/report')
@@ -119,6 +157,8 @@ export class AnalyticsController {
   @ApiQuery({ name: 'daysAhead', required: false })
   @ApiQuery({ name: 'dateFrom',  required: false, description: 'Expiry date from (YYYY-MM-DD)' })
   @ApiQuery({ name: 'dateTo',    required: false, description: 'Expiry date to (YYYY-MM-DD)' })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
   getExpiryReport(
     @CurrentUser() user: any,
     @Query('search')    search?:    string,
@@ -127,10 +167,13 @@ export class AnalyticsController {
     @Query('daysAhead') daysAhead?: string,
     @Query('dateFrom')  dateFrom?:  string,
     @Query('dateTo')    dateTo?:    string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
   ) {
     return this.svc.getExpiryReport(user.tenantId, {
       search, category, status, dateFrom, dateTo,
       daysAhead: daysAhead !== undefined ? Number(daysAhead) : undefined,
+      page, pageSize,
     });
   }
 
@@ -141,14 +184,18 @@ export class AnalyticsController {
   @ApiQuery({ name: 'dateFrom',           required: false })
   @ApiQuery({ name: 'dateTo',             required: false })
   @ApiQuery({ name: 'insuranceCompanyId', required: false })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
   getInsuranceClaimsReport(
     @CurrentUser() user: any,
     @Query('dateFrom')           dateFrom?:           string,
     @Query('dateTo')             dateTo?:             string,
     @Query('insuranceCompanyId') insuranceCompanyId?: string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
   ) {
     return this.svc.getInsuranceClaimsReport(user.tenantId, {
-      dateFrom, dateTo, insuranceCompanyId,
+      dateFrom, dateTo, insuranceCompanyId, page, pageSize,
     });
   }
 

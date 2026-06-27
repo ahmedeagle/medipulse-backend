@@ -224,6 +224,9 @@ export class BatchesService {
         throw new ForbiddenException('You do not have access to this batch');
       }
 
+      const prevCost = batch.costPerUnit;
+      const prevSell = batch.sellingPrice;
+
       if (patch.batchNumber !== undefined) batch.batchNumber = patch.batchNumber?.trim() || null;
       if (patch.expiryDate  !== undefined) batch.expiryDate  = patch.expiryDate ? new Date(patch.expiryDate) : null;
       if (patch.location    !== undefined) batch.location    = patch.location?.trim() || null;
@@ -234,6 +237,28 @@ export class BatchesService {
 
       const savedBatch = await batchRepo.save(batch);
       const updated = await this.recomputeAggregate(manager, batch.inventoryItemId);
+
+      // Domain audit: price edits are compliance-critical (margin / COGS trail).
+      // Captured by DomainEventStoreListener → domain_event_logs (who, old→new).
+      const priceChanged =
+        (patch.costPerUnit  !== undefined && Number(patch.costPerUnit)  !== Number(prevCost ?? 0)) ||
+        (patch.sellingPrice !== undefined && Number(patch.sellingPrice) !== Number(prevSell ?? 0));
+      if (priceChanged) {
+        this.eventEmitter.emit(EVENTS.INVENTORY_PRICE_CHANGED, {
+          tenantId,
+          userId:                _userId,
+          inventoryItemId:       batch.inventoryItemId,
+          batchId:               savedBatch.id,
+          productId:             updated.productId,
+          previousCostPrice:     prevCost ?? null,
+          newCostPrice:          savedBatch.costPerUnit ?? null,
+          previousSellingPrice:  prevSell ?? null,
+          newSellingPrice:       savedBatch.sellingPrice ?? null,
+          effectiveCostPrice:    updated.costPrice ?? null,
+          effectiveSellingPrice: updated.sellingPrice ?? null,
+        });
+      }
+
       return { batch: savedBatch, inventory: updated };
     });
   }

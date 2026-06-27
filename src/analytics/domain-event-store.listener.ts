@@ -41,7 +41,7 @@ export class DomainEventStoreListener implements OnModuleInit {
     await this.repo.save(
       this.repo.create({
         eventType,
-        aggregateId:   safe.orderId ?? safe.productId ?? safe.recommendationId ?? safe.catalogItemId ?? null,
+        aggregateId:   safe.orderId ?? safe.productId ?? safe.recommendationId ?? safe.catalogItemId ?? safe.transactionId ?? null,
         aggregateType: this.inferAggregateType(eventType),
         tenantId:      safe.tenantId ?? safe.pharmacyTenantId ?? safe.supplierTenantId ?? null,
         payload:       safe,
@@ -59,6 +59,7 @@ export class DomainEventStoreListener implements OnModuleInit {
       supplier:       'supplier_catalog',
       stock:          'inventory',
       ai:             'ai',
+      pos:            'pos',
     };
     return map[prefix] ?? prefix;
   }

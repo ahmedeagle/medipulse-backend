@@ -9,7 +9,7 @@ config({ path: resolve(process.cwd(), '.env') });
  * Standalone DataSource for the AUDIT database TypeORM CLI.
  * Used by: npm run migration:run:audit | migration:generate:audit
  */
-export const AuditDataSource = new DataSource({
+export default new DataSource({
   type:     'postgres',
   url:      process.env.AUDIT_DATABASE_URL,
 
@@ -23,5 +23,3 @@ export const AuditDataSource = new DataSource({
   synchronize: false,
   logging:     false,
 });
-
-export default AuditDataSource;

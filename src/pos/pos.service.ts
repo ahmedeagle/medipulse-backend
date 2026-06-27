@@ -368,6 +368,31 @@ export class PosService {
         this.logger.log(`POS: low-stock event emitted for "${ev.productNameAr}" (qty ${ev.quantity}/${ev.minThreshold})`);
       }
 
+      // Domain audit: immutable record of the sale/return — who sold what, qty,
+      // price, to whom. Captured by DomainEventStoreListener → domain_event_logs.
+      this.eventEmitter.emit(EVENTS.POS_SALE_RECORDED, {
+        tenantId,
+        transactionId:  tx.id,
+        shiftId:        shift.id,
+        cashierId:      userId,
+        customerId:     dto.customerId ?? null,
+        type:           dto.type,
+        paymentMethod:  dto.paymentMethod,
+        subtotal,
+        discountAmount: discount,
+        taxAmount,
+        totalAmount:    total,
+        items: items.map(i => ({
+          inventoryItemId: i.inventoryItemId,
+          productId:       i.productId,
+          productName:     i.productName,
+          quantity:        i.quantity,
+          unitPrice:       i.unitPrice,
+          discountAmount:  i.discountAmount,
+          subtotal:        i.subtotal,
+        })),
+      });
+
       return { ...tx, items: items as any };
     } catch (err) {
       await qr.rollbackTransaction();

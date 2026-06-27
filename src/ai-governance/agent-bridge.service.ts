@@ -290,7 +290,7 @@ export class AgentBridgeService {
     const supplierIds = Array.from(new Set(drafts.map(d => d.supplierTenantId)));
     const draftIds    = drafts.map(d => d.id);
 
-    const [products, suppliers, existing, listings] = await Promise.all([
+    const [products, suppliers, existing, listings, minOrderRows] = await Promise.all([
       productIds.length
         ? this.productRepo.find({ where: { id: In(productIds) } })
         : Promise.resolve([]),
@@ -311,10 +311,20 @@ export class AgentBridgeService {
             select: ['productId', 'supplierTenantId', 'stock'],
           })
         : Promise.resolve([]),
+      supplierIds.length
+        ? this.dataSource.query(
+            `SELECT "supplierTenantId", "minOrderAmount" FROM supplier_profiles WHERE "supplierTenantId" = ANY($1)`,
+            [supplierIds],
+          )
+        : Promise.resolve([]),
     ]);
 
     const productById  = new Map(products.map(p => [p.id, p]));
     const supplierById = new Map(suppliers.map(s => [s.id, s]));
+    const minOrderBySupplier = new Map<string, number>(
+      (minOrderRows as Array<{ supplierTenantId: string; minOrderAmount: string }>)
+        .map(r => [r.supplierTenantId, Number(r.minOrderAmount) || 0]),
+    );
     const seen         = new Set(existing.map(a => a.subjectId));
     // Pre-flight set: only drafts whose (productId, supplierTenantId) tuple
     // still has an *available* listing should ever reach the human queue.
@@ -430,6 +440,7 @@ export class AgentBridgeService {
             groupDrafts,
             productById,
             supplierById.get(groupDrafts[0].supplierTenantId),
+            minOrderBySupplier.get(groupDrafts[0].supplierTenantId) ?? 0,
           );
           if (approval) {
             await this.draftRepo.update(
@@ -549,6 +560,7 @@ export class AgentBridgeService {
     drafts:       ProcurementDraft[],
     productById:  Map<string, Product>,
     supplier:     Tenant | undefined,
+    minOrderAmount = 0,
   ): Promise<Approval | null> {
     const supplierName = supplier?.name || 'المورد';
     const tenantId     = drafts[0].pharmacyTenantId;
@@ -635,6 +647,14 @@ export class AgentBridgeService {
         draftIds:     drafts.map(d => d.id),
         subtotal,
         totalVat,
+        // Volume-tier guidance: does this consolidated basket clear the
+        // supplier's minimum-order threshold? Helps the pharmacist decide
+        // whether to add more lines before sending one shipment.
+        minOrderAmount,
+        belowMinimum:    minOrderAmount > 0 && subtotal < minOrderAmount,
+        amountToMinimum: minOrderAmount > 0 && subtotal < minOrderAmount
+                          ? Math.round((minOrderAmount - subtotal) * 100) / 100
+                          : 0,
         planVerdicts,
       },
       confidenceReason: `تم تجميع طلبات متعددة لنفس المورد بناءً على توصيات المخزون الحالية وأفضل سعر متاح لكل صنف.`,

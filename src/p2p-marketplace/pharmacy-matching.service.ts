@@ -42,9 +42,27 @@ export class PharmacyMatchingService {
 
     this.logger.log(`Pharmacy matching: ${matches.length} match(es) found`);
 
+    // Resolve product names once (Arabic-first) so every message is readable
+    // by a non-technical pharmacist — never a raw UUID.
+    const productIds = Array.from(new Set(matches.map((m) => m.productId)));
+    const nameRows: Array<{ id: string; name: string }> = await this.dataSource.query(
+      `SELECT id, COALESCE("nameAr", name) AS name FROM products WHERE id = ANY($1::uuid[])`,
+      [productIds],
+    );
+    const nameMap = new Map(nameRows.map((r) => [r.id, r.name]));
+
+    // Most-urgent surplus opportunity per seller — matches arrive ordered by
+    // shortage_qty DESC, so the first time a seller appears is their top need.
+    const sellerNudges = new Map<
+      string,
+      { productName: string; city: string; excessQty: number; shortageQty: number }
+    >();
+
     for (const match of matches) {
+      const productName = nameMap.get(match.productId) ?? 'منتج';
       const payload = {
         productId: match.productId,
+        productName,
         city: match.city,
         excessTenantId: match.excessTenantId,
         excessQty: match.excessQty,
@@ -55,9 +73,9 @@ export class PharmacyMatchingService {
         excessPrice: match.excessPrice,
       };
 
-      const explanation = match.excessPrice
-        ? `A nearby pharmacy in ${match.city} has ${match.excessQty} units to sell at ${match.excessPrice} SAR — covering your shortage of ${match.shortageQty} units.`
-        : `A nearby pharmacy in ${match.city} has ${match.excessQty} excess units — you have a shortage of ${match.shortageQty}.`;
+      const buyerExplanation = match.excessPrice
+        ? `صيدلية قريبة في ${match.city} لديها ${match.excessQty} وحدة من «${productName}» معروضة للبيع بسعر ${match.excessPrice} ج.م — تكفي لتغطية نقصك البالغ ${match.shortageQty} وحدة.`
+        : `صيدلية قريبة في ${match.city} لديها فائض ${match.excessQty} وحدة من «${productName}»، وأنت بنقص ${match.shortageQty} وحدة — يمكنك طلبها عبر سوق التبادل بدل انتظار المورد.`;
 
       // Recommendation for the pharmacy WITH shortage (they should buy)
       await this.recRepo.save(
@@ -66,7 +84,7 @@ export class PharmacyMatchingService {
           type: RecommendationType.INTER_BRANCH_TRADE,
           productId: match.productId,
           payload,
-          explanation,
+          explanation: buyerExplanation,
           riskLevel: 'MEDIUM',
           isDismissed: false,
         } as any),
@@ -79,12 +97,50 @@ export class PharmacyMatchingService {
           type: RecommendationType.INTER_BRANCH_TRADE,
           productId: match.productId,
           payload: { ...payload, perspective: 'seller' },
-          explanation: `A nearby pharmacy in ${match.city} needs ${match.shortageQty} units — you have ${match.excessQty} excess.`,
+          explanation: `صيدلية قريبة في ${match.city} بحاجة إلى ${match.shortageQty} وحدة من «${productName}» — لديك فائض ${match.excessQty} وحدة. اعرضها للبيع عبر سوق التبادل واسترد قيمتها بدل ركودها.`,
           riskLevel: 'LOW',
           isDismissed: false,
         } as any),
       );
+
+      if (!sellerNudges.has(match.excessTenantId)) {
+        sellerNudges.set(match.excessTenantId, {
+          productName,
+          city: match.city,
+          excessQty: match.excessQty,
+          shortageQty: match.shortageQty,
+        });
+      }
     }
+
+    // Proactively nudge each surplus-holder through the notification bell they
+    // already check daily — deduped to at most one pooling nudge per pharmacy
+    // per 24h so the cron never spams. Deep-links straight to the sell page.
+    let nudged = 0;
+    for (const [tenantId, n] of sellerNudges) {
+      try {
+        await this.dataSource.query(
+          `INSERT INTO notifications ("tenantId", type, title, body, "resourceRef", "isRead", "createdAt")
+           SELECT $1, 'p2p_pool_opportunity', $2, $3, '/pharmacy/p2p?tab=sell', false, NOW()
+           WHERE NOT EXISTS (
+             SELECT 1 FROM notifications
+             WHERE "tenantId" = $1
+               AND type = 'p2p_pool_opportunity'
+               AND "createdAt" > NOW() - INTERVAL '24 hours'
+           )`,
+          [
+            tenantId,
+            `💊 فرصة بيع: صيدليات قريبة بحاجة إلى «${n.productName}»`,
+            `صيدلية قريبة في ${n.city} بحاجة إلى ${n.shortageQty} وحدة من «${n.productName}» المتوفّر لديك بفائض (${n.excessQty} وحدة). ` +
+              `اعرضه للبيع عبر «سوق التبادل» لتحويل المخزون الزائد إلى نقد وخدمة صيدلية مجاورة — اضغط هنا للنشر.`,
+          ],
+        );
+        nudged++;
+      } catch {
+        this.logger.warn(`Failed to insert p2p_pool_opportunity notification for tenant ${tenantId}`);
+      }
+    }
+    if (nudged) this.logger.log(`Pharmacy matching: nudged ${nudged} surplus-holder pharmacy(ies) to list for nearby shortages`);
   }
 
   async findMatches(limit = 100): Promise<ExchangeSuggestion[]> {

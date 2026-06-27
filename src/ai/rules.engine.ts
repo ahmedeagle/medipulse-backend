@@ -233,6 +233,31 @@ export class RulesEngine {
         ? Math.ceil(Number(schedule.eoqQty))
         : this.risk.suggestedReorderQty(adjustedDailyUsage, item.quantity, effectiveLeadDays);
 
+      // ── Rule 7: Margin-aware restock prioritisation ──────────────────────────
+      // When cash is tight a pharmacist can't restock everything at once. We rank
+      // each reorder by *profit velocity* = how many EGP of gross profit this item
+      // earns per day — so the fast-moving, high-margin medicines get restocked
+      // first. Decimal columns arrive as strings → coerce with Number().
+      const costPrice    = item.costPrice != null ? Number(item.costPrice) : 0;
+      const sellingPrice = item.sellingPrice != null ? Number(item.sellingPrice) : 0;
+      const unitMargin   = sellingPrice > 0 && costPrice > 0 ? sellingPrice - costPrice : 0;
+      const marginPct    = sellingPrice > 0 && costPrice > 0
+        ? Math.round((unitMargin / sellingPrice) * 100)
+        : null;
+      // Daily gross profit you forfeit while this item is out of stock.
+      const profitVelocity = Math.round(unitMargin * adjustedDailyUsage * 100) / 100;
+      // Cash needed to act on this reorder (helps the pharmacist budget).
+      const restockCost = Math.round(suggestedQty * costPrice * 100) / 100;
+      // Plain-Arabic tier for the non-technical end user.
+      const priorityTier: 'high' | 'medium' | 'low' =
+        profitVelocity >= 50 ? 'high' : profitVelocity >= 15 ? 'medium' : 'low';
+      const priorityLabel =
+        priorityTier === 'high'
+          ? 'أولوية عالية — ربح يومي مرتفع'
+          : priorityTier === 'medium'
+            ? 'أولوية متوسطة'
+            : 'أولوية منخفضة';
+
       // Pick the most reliable available supplier for the suggestion
       const availableListings = (catalogByProduct.get(item.productId) ?? []).filter((l) => l.isAvailable);
       const recommendedSupplier = this.pickBestSupplier(availableListings, supplierScores);
@@ -253,6 +278,18 @@ export class RulesEngine {
           recommendedSupplier: recommendedSupplier
             ? { tenantId: recommendedSupplier.supplierTenantId, reliabilityLabel: supplierScores.get(recommendedSupplier.supplierTenantId)?.reliabilityLabel ?? 'unknown' }
             : null,
+          // Margin-aware restock prioritisation (Rule 7) — lets a cash-constrained
+          // pharmacist restock the most profitable fast-movers first.
+          economics: {
+            costPrice,
+            sellingPrice,
+            unitMargin: Math.round(unitMargin * 100) / 100,
+            marginPct,
+            profitVelocity,   // EGP/day of gross profit lost while out of stock
+            restockCost,      // EGP needed to fulfil suggestedReorderQty
+            priorityTier,
+            priorityLabel,
+          },
           demand: {
             avg30: Math.round(signal.avg30 * 10) / 10,
             avg90: Math.round(signal.avg90 * 10) / 10,

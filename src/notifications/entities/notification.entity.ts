@@ -54,7 +54,8 @@ export type NotificationType =
   | 'overpayment_alert'            // pharmacy paying above market avg for a product
   // ── Decision Engine (P1 auto-draft outcomes) ──────────────────────────────
   | 'procurement_delay_suggested'  // orchestrator suggests delaying purchase for cash-flow reasons
-  | 'p2p_opportunity';             // orchestrator found a cheaper P2P alternative
+  | 'p2p_opportunity'              // orchestrator found a cheaper P2P alternative
+  | 'p2p_pool_opportunity';        // regional pooling: a nearby pharmacy needs your surplus → list it
 
 /**
  * In-app notification per user.

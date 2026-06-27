@@ -5,7 +5,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { SupplierProfile, ProfileStatus } from './entities/supplier-profile.entity';
 import {
   normalizePagination,
@@ -13,11 +13,17 @@ import {
   PaginationQueryDto,
 } from '../common/pagination/pagination-query.dto';
 
+export interface SupplierMarketplaceCard extends SupplierProfile {
+  reliabilityScore: number | null;
+  reliabilityLabel: string | null;
+}
+
 @Injectable()
 export class SupplierProfileService {
   constructor(
     @InjectRepository(SupplierProfile)
     private readonly repo: Repository<SupplierProfile>,
+    private readonly dataSource: DataSource,
   ) {}
 
   // ── Supplier: manage own profile ──────────────────────────────────────────
@@ -67,6 +73,32 @@ export class SupplierProfileService {
       skip: offset,
     });
     return { data, total, limit, offset };
+  }
+
+  async findAllWithReliability(
+    pagination: PaginationQueryDto = {},
+  ): Promise<PaginatedResult<SupplierMarketplaceCard>> {
+    const { limit, offset } = normalizePagination(pagination);
+
+    const rows: SupplierMarketplaceCard[] = await this.dataSource.query(
+      `SELECT p.*,
+              s."overallScore"      AS "reliabilityScore",
+              s."reliabilityLabel"  AS "reliabilityLabel"
+       FROM   supplier_profiles p
+       LEFT JOIN supplier_reliability_scores s
+              ON s."supplierTenantId" = p."supplierTenantId"
+             AND s."productId" IS NULL
+       WHERE  p.status = 'verified'
+       ORDER  BY s."overallScore" DESC NULLS LAST, p."companyName" ASC
+       LIMIT  $1 OFFSET $2`,
+      [limit, offset],
+    );
+
+    const [{ count }] = await this.dataSource.query(
+      `SELECT COUNT(*) AS count FROM supplier_profiles WHERE status = 'verified'`,
+    );
+
+    return { data: rows, total: Number(count), limit, offset };
   }
 
   /** Suppliers in a given delivery zone — used by demand signal queries */

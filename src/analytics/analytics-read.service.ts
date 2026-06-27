@@ -367,6 +367,308 @@ export class AnalyticsReadService {
     return all.filter(r => r.supplierTenantId === supplierTenantId);
   }
 
+  /**
+   * Price Intelligence — aggregated view across all suppliers for a product.
+   * Used by PriceIntelligencePage and ProcurementOrchestrator overpayment detection.
+   *
+   * Now includes the open P2P marketplace as a virtual "supplier" so the
+   * pharmacy sees a complete picture of what's available (the whole platform
+   * pitch — buying from another pharmacy is often the cheapest path in
+   * GCC + Egypt B2B pharma). Overpayment threshold is tenant-configurable
+   * via `pharmacy_settings.aiAnalysisSettings.overpaymentThresholdPct`.
+   */
+  async getPriceIntelligence(
+    tenantId: string,
+    productId: string,
+    days = 90,
+    range: { from?: string; to?: string } = {},
+  ): Promise<PriceIntelligenceResult> {
+    // Resolve effective window: explicit from/to wins over relative `days`.
+    let since: Date;
+    let until: Date | null = null;
+    if (range.from && range.to) {
+      since = new Date(range.from);
+      until = new Date(range.to);
+      // make `to` inclusive (end of day)
+      until.setHours(23, 59, 59, 999);
+      // recompute `days` so the response carries the actual window size
+      days = Math.max(1, Math.ceil((until.getTime() - since.getTime()) / 86_400_000));
+    } else {
+      since = new Date(Date.now() - days * 86_400_000);
+    }
+
+    // Resolve tenant-specific overpayment threshold (default 15%)
+    const thresholdRows: Array<{ threshold: number | null }> = await this.dataSource.query(
+      `SELECT NULLIF(("aiAnalysisSettings"->>'overpaymentThresholdPct')::numeric, 0)::float AS threshold
+         FROM pharmacy_settings
+        WHERE "pharmacyTenantId" = $1
+        LIMIT 1`,
+      [tenantId],
+    );
+    const overpaymentThresholdPct =
+      thresholdRows[0]?.threshold !== undefined && thresholdRows[0]?.threshold !== null
+        ? Number(thresholdRows[0].threshold)
+        : 15;
+
+    // Daily-bucketed aggregation — was raw row fetch (100k+ rows on 180-day windows)
+    // Result set is bounded: at most (days × suppliers) rows
+    const rows: Array<{
+      supplierTenantId: string;
+      supplierName: string | null;
+      day: string;
+      avg_price: number;
+      min_price: number;
+      max_price: number;
+    }> = await this.dataSource.query(
+      `
+      SELECT
+        ps."supplierTenantId",
+        t.name                                          AS "supplierName",
+        DATE_TRUNC('day', ps."recordedAt")::date::text  AS day,
+        AVG(ps.price)::float                            AS avg_price,
+        MIN(ps.price)::float                            AS min_price,
+        MAX(ps.price)::float                            AS max_price
+      FROM price_snapshots ps
+      LEFT JOIN tenants t ON t.id = ps."supplierTenantId"
+      WHERE ps."productId" = $1
+        AND ps."recordedAt" >= $2
+        AND ($3::timestamp IS NULL OR ps."recordedAt" <= $3)
+      GROUP BY ps."supplierTenantId", t.name, DATE_TRUNC('day', ps."recordedAt")
+      ORDER BY ps."supplierTenantId", day ASC
+      `,
+      [productId, since, until],
+    );
+
+    // Active P2P marketplace listings (current cross-pharmacy offers).
+    // We aggregate by updatedAt-day so the marketplace appears as a real
+    // time-series line in the page chart, not a single dot.
+    const p2pRows: Array<{
+      day: string;
+      avg_price: number;
+      min_price: number;
+      max_price: number;
+    }> = await this.dataSource.query(
+      `
+      SELECT
+        DATE_TRUNC('day', l."updatedAt")::date::text AS day,
+        AVG(l.price)::float                          AS avg_price,
+        MIN(l.price)::float                          AS min_price,
+        MAX(l.price)::float                          AS max_price
+      FROM p2p_listings l
+      WHERE l."productId" = $1
+        AND l."sellerTenantId" <> $2
+        AND l.status = 'active'
+        AND l.quantity > 0
+        AND l."updatedAt" >= $3
+        AND ($4::timestamp IS NULL OR l."updatedAt" <= $4)
+      GROUP BY DATE_TRUNC('day', l."updatedAt")
+      ORDER BY day ASC
+      `,
+      [productId, tenantId, since, until],
+    );
+
+    // Lowest currently-active marketplace listing (used by the "best price now" KPI)
+    const marketplaceNowRows: Array<{ best: number | null }> = await this.dataSource.query(
+      `
+      SELECT MIN(l.price)::float AS best
+        FROM p2p_listings l
+       WHERE l."productId" = $1
+         AND l."sellerTenantId" <> $2
+         AND l.status = 'active'
+         AND l.quantity > 0
+      `,
+      [productId, tenantId],
+    );
+    const marketplaceBestPrice =
+      marketplaceNowRows[0]?.best !== null && marketplaceNowRows[0]?.best !== undefined
+        ? Number(marketplaceNowRows[0].best)
+        : null;
+
+    // Last price this pharmacy paid (from approved purchase orders)
+    const lastPaidRows: Array<{ unit_price: string; paid_at: Date }> = await this.dataSource.query(
+      `
+      SELECT oi."unitPrice"::text AS unit_price, o."createdAt" AS paid_at
+      FROM order_items oi
+      JOIN orders o ON o.id = oi."orderId"
+      WHERE o."pharmacyTenantId" = $1
+        AND oi."productId" = $2
+        AND o.status IN ('delivered', 'accepted', 'shipped')
+      ORDER BY o."createdAt" DESC
+      LIMIT 1
+      `,
+      [tenantId, productId],
+    );
+
+    const lastPricePaid = lastPaidRows.length > 0 ? parseFloat(lastPaidRows[0].unit_price) : null;
+
+    // Fallback: when no historical price_snapshots exist yet (and no live
+    // P2P listings) we still want the page to be useful. Pull the current
+    // supplier_catalog_items for this product so the UI can render TODAY's
+    // available prices as a single point per supplier — better than the
+    // "no data" empty state. This is the common case for newly-onboarded
+    // products that haven't had any catalog price changes yet.
+    if (!rows.length && !p2pRows.length) {
+      const todayISO = new Date().toISOString().slice(0, 10);
+      const fallback: Array<{
+        supplierTenantId: string;
+        supplierName: string | null;
+        price: number;
+      }> = await this.dataSource.query(
+        `
+        SELECT
+          c."supplierTenantId",
+          t.name              AS "supplierName",
+          c.price::float      AS price
+        FROM supplier_catalog_items c
+        LEFT JOIN tenants t ON t.id = c."supplierTenantId"
+        WHERE c."productId"   = $1
+          AND c."isAvailable" = true
+          AND c."deletedAt"   IS NULL
+        ORDER BY c.price ASC
+        LIMIT 50
+        `,
+        [productId],
+      );
+      if (fallback.length) {
+        for (const f of fallback) {
+          rows.push({
+            supplierTenantId: f.supplierTenantId,
+            supplierName:     f.supplierName,
+            day:              todayISO,
+            avg_price:        f.price,
+            min_price:        f.price,
+            max_price:        f.price,
+          });
+        }
+      }
+    }
+
+    if (!rows.length && !p2pRows.length) {
+      return {
+        productId,
+        days,
+        series: [],
+        supplierBreakdown: [],
+        bestPrice: null,
+        bestPriceNow: null,
+        marketplaceBestPrice,
+        avgPrice: null,
+        lastPricePaid,
+        overpaymentWarning: false,
+        overpaymentPct: 0,
+        overpaymentThresholdPct,
+      };
+    }
+
+    // Group by supplier — include per-day min/max for accurate breakdown
+    const bySupplier = new Map<string, {
+      name: string;
+      points: Array<{ date: string; price: number }>;
+      minPrices: number[];
+      maxPrices: number[];
+    }>();
+    for (const r of rows) {
+      if (!bySupplier.has(r.supplierTenantId)) {
+        bySupplier.set(r.supplierTenantId, {
+          name: r.supplierName ?? r.supplierTenantId,
+          points: [],
+          minPrices: [],
+          maxPrices: [],
+        });
+      }
+      const entry = bySupplier.get(r.supplierTenantId)!;
+      entry.points.push({ date: r.day, price: r.avg_price });
+      entry.minPrices.push(r.min_price);
+      entry.maxPrices.push(r.max_price);
+    }
+
+    // Summary stats from aggregated data — suppliers only
+    const supplierMinValues = rows.map((r) => r.min_price);
+    const bestPrice = supplierMinValues.length ? Math.min(...supplierMinValues) : null;
+
+    // "Best price now" = lowest *latest* price per supplier (no expired promos)
+    const latestPerSupplier: number[] = [...bySupplier.values()].map(
+      (v) => v.points[v.points.length - 1]?.price ?? Infinity,
+    );
+    const bestSupplierNow = latestPerSupplier.length ? Math.min(...latestPerSupplier) : null;
+    const bestPriceNow = [
+      bestSupplierNow !== null && Number.isFinite(bestSupplierNow) ? bestSupplierNow : null,
+      marketplaceBestPrice,
+    ].filter((v): v is number => v !== null).reduce<number | null>(
+      (acc, v) => (acc === null ? v : Math.min(acc, v)),
+      null,
+    );
+
+    const allAvg = rows.map((r) => r.avg_price);
+    const avgPrice = allAvg.length ? allAvg.reduce((s, p) => s + p, 0) / allAvg.length : null;
+
+    const overpaymentPct = lastPricePaid && avgPrice && avgPrice > 0
+      ? Math.round(((lastPricePaid - avgPrice) / avgPrice) * 100)
+      : 0;
+
+    // Build the series — suppliers + (when present) the marketplace line
+    const series = [...bySupplier.entries()].map(([supplierId, v]) => ({
+      supplierId,
+      supplierName: v.name,
+      isMarketplace: false,
+      points: v.points,
+    }));
+
+    if (p2pRows.length) {
+      series.push({
+        supplierId: '__marketplace__',
+        supplierName: 'السوق المفتوح (P2P)',
+        isMarketplace: true,
+        points: p2pRows.map((r) => ({ date: r.day, price: r.avg_price })),
+      });
+    }
+
+    const supplierBreakdown = [...bySupplier.entries()].map(([supplierId, v]) => {
+      const last = v.points[v.points.length - 1];
+      const avgOfAvgs = v.points.reduce((s, p) => s + p.price, 0) / v.points.length;
+      return {
+        supplierId,
+        supplierName: v.name,
+        isMarketplace: false,
+        latestPrice: last ? last.price : 0,
+        minPrice: Math.min(...v.minPrices),
+        maxPrice: Math.max(...v.maxPrices),
+        avgPrice: Math.round(avgOfAvgs * 100) / 100,
+      };
+    });
+
+    if (p2pRows.length) {
+      const minP = Math.min(...p2pRows.map((r) => r.min_price));
+      const maxP = Math.max(...p2pRows.map((r) => r.max_price));
+      const avgP = p2pRows.reduce((s, r) => s + r.avg_price, 0) / p2pRows.length;
+      const last = p2pRows[p2pRows.length - 1];
+      supplierBreakdown.push({
+        supplierId: '__marketplace__',
+        supplierName: 'السوق المفتوح (P2P)',
+        isMarketplace: true,
+        latestPrice: marketplaceBestPrice ?? last.avg_price,
+        minPrice: minP,
+        maxPrice: maxP,
+        avgPrice: Math.round(avgP * 100) / 100,
+      });
+    }
+
+    return {
+      productId,
+      days,
+      series,
+      supplierBreakdown,
+      bestPrice,
+      bestPriceNow,
+      marketplaceBestPrice,
+      avgPrice: avgPrice !== null ? Math.round(avgPrice * 100) / 100 : null,
+      lastPricePaid,
+      overpaymentWarning: overpaymentPct > overpaymentThresholdPct,
+      overpaymentPct,
+      overpaymentThresholdPct,
+    };
+  }
+
   // ─── Sales Summary Report ─────────────────────────────────────────────────
 
   async getSalesSummary(
@@ -1160,4 +1462,37 @@ export class AnalyticsReadService {
 
     return { data, total };
   }
+}
+
+export interface PriceIntelligenceResult {
+  productId: string;
+  days: number;
+  series: Array<{
+    supplierId: string;
+    supplierName: string;
+    /** When true, this "supplier" represents the open P2P marketplace, not a wholesale supplier. */
+    isMarketplace?: boolean;
+    points: Array<{ date: string; price: number }>;
+  }>;
+  supplierBreakdown: Array<{
+    supplierId: string;
+    supplierName: string;
+    isMarketplace?: boolean;
+    latestPrice: number;
+    minPrice: number;
+    maxPrice: number;
+    avgPrice: number;
+  }>;
+  /** Historical minimum over the window (may include expired promotions). */
+  bestPrice: number | null;
+  /** Lowest price available *right now* across suppliers (excludes marketplace). */
+  bestPriceNow: number | null;
+  /** Lowest active P2P marketplace listing for this product, if any. */
+  marketplaceBestPrice: number | null;
+  avgPrice: number | null;
+  lastPricePaid: number | null;
+  overpaymentWarning: boolean;
+  overpaymentPct: number;
+  /** Resolved threshold (pharmacy_settings.aiAnalysisSettings.overpaymentThresholdPct ?? 15). */
+  overpaymentThresholdPct: number;
 }

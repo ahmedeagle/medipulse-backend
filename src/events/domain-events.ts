@@ -194,6 +194,7 @@ export const P2P_EVENTS = {
   ORDER_REJECTED:     'p2p.order.rejected',
   ORDER_COMPLETED:    'p2p.order.completed',
   ORDER_CANCELLED:    'p2p.order.cancelled',
+  ORDER_DISPUTE_OPENED: 'p2p.order.dispute_opened',
   INVOICE_GENERATED:  'p2p.invoice.generated',
   PROFILE_SUBMITTED:  'p2p.profile.submitted',
   PROFILE_VERIFIED:   'p2p.profile.verified',

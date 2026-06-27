@@ -38,8 +38,14 @@ export interface EnrichedP2pOrder extends P2pOrder {
   bonusQty: number | null;
   sellerName: string | null;
   sellerCity: string | null;
+  sellerPhone: string | null;
+  sellerEmail: string | null;
+  sellerWhatsapp: string | null;
   buyerName: string | null;
   buyerCity: string | null;
+  buyerPhone: string | null;
+  buyerEmail: string | null;
+  buyerWhatsapp: string | null;
   hasInvoice: boolean;
   hasDispute: boolean;
 }
@@ -175,13 +181,16 @@ export class P2pOrdersService {
     if (order.sellerTenantId !== sellerTenantId) throw new ForbiddenException('Not your order');
     if (order.status !== 'accepted') throw new BadRequestException('Order must be accepted before shipping');
 
-    const setClauses = dto.note
-      ? `status = 'shipped', "shippedAt" = NOW(), "deliveryNote" = $3`
-      : `status = 'shipped', "shippedAt" = NOW()`;
-    const qParams = dto.note ? [orderId, sellerTenantId, dto.note] : [orderId, sellerTenantId];
+    // Fully parameterized — COALESCE keeps the existing note when none is supplied,
+    // so the SET clause is a fixed string with no conditional concatenation.
     const [updated] = await this.dataSource.query<P2pOrder[]>(
-      `UPDATE p2p_orders SET ${setClauses} WHERE id = $1 AND "sellerTenantId" = $2 AND status = 'accepted' RETURNING *`,
-      qParams,
+      `UPDATE p2p_orders
+          SET status = 'shipped',
+              "shippedAt" = NOW(),
+              "deliveryNote" = COALESCE($3, "deliveryNote")
+        WHERE id = $1 AND "sellerTenantId" = $2 AND status = 'accepted'
+        RETURNING *`,
+      [orderId, sellerTenantId, dto.note ?? null],
     );
     if (!updated) throw new BadRequestException('Order could not be updated — status may have changed');
 
@@ -502,8 +511,14 @@ export class P2pOrdersService {
           l."bonusQty"                             AS "bonusQty",
           COALESCE(sp_s."legalName", t_s.name)    AS "sellerName",
           COALESCE(sp_s.city, t_s.city)           AS "sellerCity",
+          sp_s.phone                              AS "sellerPhone",
+          sp_s.email                              AS "sellerEmail",
+          sp_s.whatsapp                           AS "sellerWhatsapp",
           COALESCE(sp_b."legalName", t_b.name)    AS "buyerName",
           COALESCE(sp_b.city, t_b.city)           AS "buyerCity",
+          sp_b.phone                              AS "buyerPhone",
+          sp_b.email                              AS "buyerEmail",
+          sp_b.whatsapp                           AS "buyerWhatsapp",
           (ti."p2pOrderId" IS NOT NULL)            AS "hasInvoice",
           (dp."p2pOrderId" IS NOT NULL)            AS "hasDispute"
         FROM p2p_orders o
@@ -564,7 +579,7 @@ export class P2pOrdersService {
     const existing = await this.disputeRepo.findOne({ where: { p2pOrderId: orderId } });
     if (existing) throw new BadRequestException('A dispute already exists for this order');
 
-    return this.disputeRepo.save(
+    const dispute = await this.disputeRepo.save(
       this.disputeRepo.create({
         p2pOrderId: orderId,
         raisedByTenantId: buyerTenantId,
@@ -573,6 +588,17 @@ export class P2pOrdersService {
         evidenceUrls: dto.evidenceUrls ?? [],
       }),
     );
+
+    // Notify the SELLER that a dispute was raised so they can respond promptly
+    // rather than discovering it only when they next open the order.
+    this.eventEmitter.emit(P2P_EVENTS.ORDER_DISPUTE_OPENED, {
+      orderId,
+      buyerTenantId,
+      sellerTenantId: order.sellerTenantId,
+      disputeType: dto.type,
+    });
+
+    return dispute;
   }
 
   async getDispute(tenantId: string, orderId: string): Promise<P2pDispute | null> {

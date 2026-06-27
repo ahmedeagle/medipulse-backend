@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsUUID, IsNumber, IsOptional, IsDateString, IsString, Min } from 'class-validator';
+import { IsUUID, IsNumber, IsOptional, IsDateString, IsString, Min, Max, MaxLength } from 'class-validator';
 
 export class CreateInventoryItemDto {
   @ApiProperty({ example: 'uuid-of-product' })
@@ -19,18 +19,18 @@ export class CreateInventoryItemDto {
   expiryDate?: string;
 
   @ApiPropertyOptional({ example: 'LOT-2024-001' })
-  @IsOptional() @IsString()
+  @IsOptional() @IsString() @MaxLength(100)
   batchNumber?: string;
 
   @ApiPropertyOptional({ example: 'Main Warehouse' })
-  @IsOptional() @IsString()
+  @IsOptional() @IsString() @MaxLength(100)
   location?: string;
 
   @ApiPropertyOptional({ example: 35.00 })
-  @IsOptional() @IsNumber()
+  @IsOptional() @IsNumber() @Min(0) @Max(999999)
   costPrice?: number;
 
   @ApiPropertyOptional({ example: 45.00 })
-  @IsOptional() @IsNumber()
+  @IsOptional() @IsNumber() @Min(0) @Max(999999)
   sellingPrice?: number;
 }

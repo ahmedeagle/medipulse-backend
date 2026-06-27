@@ -27,6 +27,7 @@ export type NotificationType =
   | 'p2p_order_completed'
   | 'p2p_order_cancelled'
   | 'p2p_order_shipped'
+  | 'p2p_order_disputed'
   | 'p2p_invoice_ready'
   | 'p2p_profile_submitted'
   | 'p2p_profile_verified'
@@ -48,7 +49,12 @@ export type NotificationType =
   | 'pos_integrity_alert'         // cash mismatch or high refund rate flagged
   | 'pos_integrity_resolved'      // manager reviewed and acknowledged
   // ── Expiry Liquidation ────────────────────────────────────────────────────
-  | 'clearance_listing_available'; // buyer notification: a clearance deal is live for a product they need
+  | 'clearance_listing_available'  // buyer notification: a clearance deal is live for a product they need
+  | 'market_shortage'              // network-wide supply shortage detected for ≥1 products
+  | 'overpayment_alert'            // pharmacy paying above market avg for a product
+  // ── Decision Engine (P1 auto-draft outcomes) ──────────────────────────────
+  | 'procurement_delay_suggested'  // orchestrator suggests delaying purchase for cash-flow reasons
+  | 'p2p_opportunity';             // orchestrator found a cheaper P2P alternative
 
 /**
  * In-app notification per user.

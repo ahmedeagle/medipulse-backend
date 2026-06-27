@@ -155,6 +155,8 @@ export class ExpiryLiquidationCron {
       agentCode:        'expiry_liquidation',
       subjectType:      'expiry_liquidation',
       subjectId:        row.id,
+      // Same liquidation need as dead_stock — collapse onto one card.
+      needKey:          `liquidate::${row.productId}`,
       title:            `تصفية: ${productLabel} — ينتهي في ${daysToExpiry} يوم`,
       summary: priceKnown
         ? `${row.quantity} وحدة بسعر ${suggestedPrice} ج.م (خصم ${cfg.discountPct}%) — قيمة المخاطرة: ${riskValue} ج.م`

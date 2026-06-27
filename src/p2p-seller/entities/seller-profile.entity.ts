@@ -41,6 +41,23 @@ export class SellerProfile {
   @Column({ type: 'text', nullable: true })
   address: string;
 
+  // ── Contact channels (shown to the counterparty on every P2P order) ──
+  /** Pharmacy contact phone (E.164). */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  phone: string;
+
+  /** Pharmacy contact email — invoices, dispute trail, escalations. */
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  email: string;
+
+  /**
+   * WhatsApp number (E.164, e.g. "+201234567890").
+   * Fast-channel for buyer/seller delivery coordination once an order is
+   * accepted — far higher response rate than email in MENA pharma.
+   */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  whatsapp: string;
+
   @Column({ type: 'text', nullable: true })
   pharmacyLicenseUrl: string;
 

@@ -27,8 +27,8 @@ import {
 } from '@nestjs/swagger';
 import { IsString, IsArray, IsInt, IsOptional, Min, IsUUID, IsEnum, IsNumber } from 'class-validator';
 import { Type } from 'class-transformer';
-import { OrdersService } from './orders.service';
-import { InvoiceService } from './invoice.service';
+import { Throttle } from '@nestjs/throttler';
+import { OrdersService } from './orders.service';import { InvoiceService } from './invoice.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { OrderStatus } from '../common/enums/order-status.enum';
@@ -135,12 +135,32 @@ export class OrdersController {
   }
 
   @Get(':id')
+  // Enumeration shield: anyone authenticated could otherwise brute-force
+  // sequentially through UUIDs to discover the existence of orders that
+  // do/don't belong to their tenant. 60 lookups/min is plenty for a real
+  // user opening a few orders, and orders of magnitude below what an
+  // attacker would need.
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @AuditRead('order_detail')
   @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN)
   @ApiOperation({ summary: 'Get order detail including full change history' })
   @ApiNotFoundResponse() @ApiForbiddenResponse()
   findOne(@CurrentUser() user: any, @Param('id', ParseUUIDPipe) id: string) {
     return this.ordersService.findOne(user, id);
+  }
+
+  @Get(':id/ai-context')
+  @AuditRead('order_detail')
+  @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN)
+  @ApiOperation({
+    summary: 'Get the AI plan-context that produced this order, if any',
+    description:
+      'Returns the originating ProcurementDraft snapshot (planSnapshot, splitSource, ' +
+      'suggestedQuantity, unitPriceAtDraft) plus geographic context (supplierCity, ' +
+      'buyerCity, sameCity). All fields are null for manually-created orders.',
+  })
+  getAiContext(@CurrentUser() user: any, @Param('id', ParseUUIDPipe) id: string) {
+    return this.ordersService.getAiContext(user, id);
   }
 
   // ── Create ────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AutoDraftSchedulerService } from './auto-draft-scheduler.service';
+import { ProcurementModule } from './procurement.module';
 import { ProcurementDraft } from './entities/procurement-draft.entity';
 import { AiRecommendation } from '../ai/entities/ai-recommendation.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
@@ -12,8 +13,11 @@ import { NotificationsModule } from '../notifications/notifications.module';
 /**
  * Imported only by WorkerAppModule.
  * Contains the 6am daily auto-draft cron job.
- * This closes Phase 4: drafts are prepared automatically every morning
- * without waiting for the pharmacist to click "Generate".
+ *
+ * P1: now wires the AutoDraftScheduler to the multi-signal
+ * ProcurementOrchestrator (Decision Engine v1) so generated drafts honour
+ * supplier reliability, P2P alternatives, market shortage signals and
+ * financial-health gating instead of the legacy cheapest-only logic.
  */
 @Module({
   imports: [
@@ -26,6 +30,12 @@ import { NotificationsModule } from '../notifications/notifications.module';
       Tenant,
     ]),
     NotificationsModule,
+    // Re-uses the full HTTP-app procurement module so we get
+    // ProcurementOrchestrator + ConflictResolutionEngine without duplicating
+    // their dependency graph. Each Nest app (HTTP / worker) gets its own
+    // listener instance — they cannot cross-fire because EventEmitter is
+    // in-process only.
+    ProcurementModule,
   ],
   providers: [AutoDraftSchedulerService],
 })

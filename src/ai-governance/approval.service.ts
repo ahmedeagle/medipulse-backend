@@ -86,6 +86,14 @@ export class ApprovalService {
    * Returns `null` (not an error) if the agent is disabled for this tenant
    * or the confidence falls below the effective threshold. This lets agent
    * code do `await approvals.create(...)` without branching.
+   *
+   * Central deduplication: when `dto.needKey` is provided, only ONE pending
+   * approval may exist per (tenantId, needKey). If another agent already
+   * raised an approval for the same business need, this call merges itself
+   * as an *alternative action* on the existing card instead of producing a
+   * duplicate row. This is the single chokepoint that prevents the same
+   * product from showing up as 3 tasks (low_stock + risk recommendation +
+   * dead_stock + …) — each agent stays simple, the queue stays clean.
    */
   async create(
     tenantId: string,
@@ -110,6 +118,66 @@ export class ApprovalService {
       return null;
     }
 
+    // ── Central dedup on needKey ────────────────────────────────────────
+    // Only a SELECT on the partial unique index (tenantId, needKey WHERE
+    // status IN pending/modified) — O(1) regardless of approval volume.
+    if (dto.needKey) {
+      const existing = await this.repo
+        .createQueryBuilder('a')
+        .where('a.tenantId = :tenantId',  { tenantId })
+        .andWhere('a.needKey = :needKey', { needKey: dto.needKey })
+        .andWhere(`a.status IN ('pending','modified')`)
+        .getOne();
+
+      if (existing) {
+        // Same need, second voice: fold the new proposal into
+        // `payload.alternatives[]` on the existing card. Up to 4 alternatives
+        // are kept; older ones win because users were already considering
+        // them, and unbounded growth would bloat the payload.
+        const alt = {
+          agentCode:   dto.agentCode,
+          subjectType: dto.subjectType,
+          subjectId:   dto.subjectId,
+          title:       dto.title,
+          summary:     dto.summary,
+          rationale:   dto.rationale,
+          confidence:  conf,
+          payload:     dto.payload ?? {},
+          mergedAt:    new Date().toISOString(),
+        };
+        const existingAlts = Array.isArray(existing.payload?.alternatives)
+          ? existing.payload!.alternatives
+          : [];
+        // Skip if the same agent already contributed an alternative for this
+        // need — idempotent under cron retries.
+        const alreadyMerged =
+          existing.createdByAgent === dto.agentCode ||
+          existingAlts.some((x: any) => x?.agentCode === dto.agentCode);
+        if (alreadyMerged) return existing;
+
+        const mergedPayload = {
+          ...(existing.payload ?? {}),
+          alternatives: [...existingAlts, alt].slice(0, 4),
+        };
+
+        // Priority is the strongest signal anyone raised. We only bump up,
+        // never down — a critical alternative must light up the card.
+        const rank: Record<string, number> = {
+          critical: 3, high: 2, medium: 1, low: 0,
+        };
+        const newPriority =
+          rank[dto.priority ?? 'medium'] > rank[existing.priority]
+            ? dto.priority!
+            : existing.priority;
+
+        await this.repo.update(existing.id, {
+          payload:  mergedPayload,
+          priority: newPriority,
+        });
+        return { ...existing, payload: mergedPayload, priority: newPriority };
+      }
+    }
+
     const approval = this.repo.create({
       tenantId,
       agentCode:       dto.agentCode,
@@ -126,6 +194,7 @@ export class ApprovalService {
       payload:         dto.payload ?? {},
       originalPayload: null,
       createdByAgent:  dto.agentCode,
+      needKey:         dto.needKey ?? null,
       expiresAt:       dto.expiresAt ? new Date(dto.expiresAt) : null,
     });
 

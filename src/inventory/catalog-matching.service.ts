@@ -134,8 +134,14 @@ export class CatalogMatchingService {
     const arA = normalize(profile.nameAr);
     const arB = normalize(candidate.nameAr);
 
-    const enSim = nA && nB ? Math.max(tokenSetSimilarity(nA, nB), fuzzyRatio(nA, nB)) : 0;
-    const arSim = arA && arB ? Math.max(tokenSetSimilarity(arA, arB), fuzzyRatio(arA, arB)) : 0;
+    // Use first-token fuzzyRatio only: full-string edit distance is inflated by shared
+    // suffixes like "500mg capsules", producing false positives (Amoxicillin ↔ Glucosamine).
+    const nAFirst = nA.split(' ').filter(Boolean)[0] ?? '';
+    const nBFirst = nB.split(' ').filter(Boolean)[0] ?? '';
+    const enSim = nA && nB ? Math.max(tokenSetSimilarity(nA, nB), nAFirst && nBFirst ? fuzzyRatio(nAFirst, nBFirst) : 0) : 0;
+    const arAFirst = arA.split(' ').filter(Boolean)[0] ?? '';
+    const arBFirst = arB.split(' ').filter(Boolean)[0] ?? '';
+    const arSim = arA && arB ? Math.max(tokenSetSimilarity(arA, arB), arAFirst && arBFirst ? fuzzyRatio(arAFirst, arBFirst) : 0) : 0;
     const nameSim = Math.max(enSim, arSim);
 
     if (nameSim >= 0.95) {
@@ -267,9 +273,23 @@ export class CatalogMatchingService {
     };
 
     const candidates = await this.findCandidates(profile, limit + 5);
-    return candidates
+    const filtered = candidates
       .filter(c => c.product.id !== item.productId)
       .slice(0, limit);
+
+    if (filtered.length > 0) return filtered;
+
+    // Fallback: live search returned nothing but a previous run stored a suggestedProductId.
+    // Return that stored product so the modal is never empty for items already marked "suggested".
+    const suggestedId = (item.matchExplanation as any)?.suggestedProductId;
+    if (suggestedId) {
+      const stored = await this.productRepo.findOne({ where: { id: suggestedId } });
+      if (stored && stored.id !== item.productId) {
+        return [this.scoreCandidate(profile, stored)];
+      }
+    }
+
+    return [];
   }
 
   /**

@@ -51,7 +51,8 @@ export class P2pMarketplaceController {
     @Query('limit') limit?: number,
     @Query('offset') offset?: number,
   ) {
-    return this.marketplaceService.searchUrgent(user.tenantId, buyerGps, limit, offset);
+    const cappedLimit = limit != null ? Math.min(Number(limit) || 50, 500) : undefined;
+    return this.marketplaceService.searchUrgent(user.tenantId, buyerGps, cappedLimit, offset);
   }
 
   @Get('listings/:id')
@@ -89,7 +90,7 @@ export class P2pMarketplaceController {
     const opps = await this.procurementService.getOpportunities(
       user.tenantId,
       buyerGps ?? settings.gpsLocation ?? undefined,
-      limit ? Number(limit) : 50,
+      Math.min(limit ? Number(limit) : 50, 500),
       threshold,
     );
 
@@ -103,6 +104,6 @@ export class P2pMarketplaceController {
   @Get('admin/exchange-suggestions')
   @Roles(Role.SYSTEM_ADMIN)
   getExchangeSuggestions(@Query('limit') limit?: number) {
-    return this.matchingService.findMatches(limit ? Number(limit) : 50);
+    return this.matchingService.findMatches(Math.min(limit ? Number(limit) : 50, 500));
   }
 }

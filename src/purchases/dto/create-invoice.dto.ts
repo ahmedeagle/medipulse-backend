@@ -68,7 +68,7 @@ export class CreateInvoiceDto {
   @IsOptional() @IsEnum(['percent', 'fixed'])
   discountType?: string;
 
-  @IsOptional() @IsNumber() @Min(0)
+  @IsOptional() @IsNumber() @Min(0) @Max(99999)
   discountValue?: number;
 
   @IsOptional() @IsString() @MaxLength(2000)

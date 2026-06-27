@@ -4,8 +4,13 @@ import { FinancialLedgerEntry } from './entities/financial-ledger-entry.entity';
 import { CreditWallet } from './entities/credit-wallet.entity';
 import { PaymentTransaction } from './entities/payment-transaction.entity';
 import { SupplierSettlement } from './entities/supplier-settlement.entity';
+import { Tenant } from '../auth/entities/tenant.entity';
+import { Notification } from '../notifications/entities/notification.entity';
 import { FinancialService } from './financial.service';
 import { FinancialController } from './financial.controller';
+import { FinancialHealthCron } from './financial-health.cron';
+import { CashFlowProjector } from './cash-flow-projector.service';
+import { NotificationService } from '../notifications/notification.service';
 
 @Module({
   imports: [
@@ -14,10 +19,12 @@ import { FinancialController } from './financial.controller';
       CreditWallet,
       PaymentTransaction,
       SupplierSettlement,
+      Tenant,
+      Notification,
     ]),
   ],
   controllers: [FinancialController],
-  providers:   [FinancialService],
-  exports:     [FinancialService],
+  providers:   [FinancialService, FinancialHealthCron, CashFlowProjector, NotificationService],
+  exports:     [FinancialService, CashFlowProjector],
 })
 export class FinancialModule {}

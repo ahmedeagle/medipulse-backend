@@ -196,8 +196,19 @@ export class RulesEngine {
     }
 
     // ── Rule 1 & 2: Reorder + Price Comparison (low-stock items) ─────────────
-    // Skip REORDER rules if insufficient history — risk levels would be wrong
-    for (const item of hasInsufficientHistory ? [] : inventoryItems.filter((i) => i.quantity <= i.minThreshold)) {
+    // Skip REORDER rules if insufficient history — risk levels would be wrong.
+    //
+    // Trigger = max(manual minThreshold, demand-based reorder point). This unifies
+    // the static pharmacist-set floor with the EOQ reorder point so that a product
+    // selling faster than usual (e.g. Panadol in a demand surge) is flagged BEFORE
+    // it drops below the old static minimum — without ever overwriting the manual
+    // value the pharmacist configured.
+    const reorderTrigger = (i: InventoryItem): number => {
+      const sched = scheduleData.get(i.productId);
+      const rop = sched?.reorderPoint != null ? Math.ceil(Number(sched.reorderPoint)) : 0;
+      return Math.max(i.minThreshold ?? 0, rop);
+    };
+    for (const item of hasInsufficientHistory ? [] : inventoryItems.filter((i) => i.quantity <= reorderTrigger(i))) {
       const product = item.product;
       const productName = product?.name ?? 'Unknown';
       const category = product?.category ?? '';
@@ -235,7 +246,8 @@ export class RulesEngine {
           productName,
           currentQuantity: item.quantity,
           minThreshold: item.minThreshold,
-          deficit: item.minThreshold - item.quantity,
+          effectiveReorderPoint: reorderTrigger(item),
+          deficit: Math.max(0, reorderTrigger(item) - item.quantity),
           stockDays: stockDaysRemaining,
           suggestedReorderQty: suggestedQty,
           recommendedSupplier: recommendedSupplier

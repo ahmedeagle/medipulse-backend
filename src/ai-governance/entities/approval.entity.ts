@@ -104,6 +104,16 @@ export class Approval {
   @Column({ type: 'varchar', length: 50 })
   createdByAgent: string;
 
+  /**
+   * Stable key for the underlying *business need*, e.g. `restock::<productId>`
+   * or `liquidate::<productId>`. Multiple agents that detect the same need
+   * collapse onto the first approval (merged into `payload.alternatives[]`)
+   * instead of producing duplicate task cards. NULL when an approval is
+   * inherently unique (POS shift, P2P order action, supplier basket, etc.).
+   */
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  needKey: string | null;
+
   @CreateDateColumn() createdAt: Date;
 
   @Column({ type: 'uuid', nullable: true })

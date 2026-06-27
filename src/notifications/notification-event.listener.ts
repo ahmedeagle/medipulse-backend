@@ -214,7 +214,29 @@ export class NotificationEventListener {
       this.logger.error(`P2P notification failed (invoice generated): ${err.message}`);
     }
   }
+  // ── P2P: buyer opens a dispute → notify SELLER ────────────────────────
 
+  @OnEvent(P2P_EVENTS.ORDER_DISPUTE_OPENED)
+  async onP2pOrderDisputeOpened(event: {
+    orderId: string;
+    buyerTenantId: string;
+    sellerTenantId: string;
+    disputeType?: string;
+  }): Promise<void> {
+    try {
+      // Disputes are high-importance — always notify the seller regardless of
+      // the orderActivity preference; they must act on it.
+      await this.notificationSvc.create({
+        tenantId:    event.sellerTenantId,
+        type:        'p2p_order_disputed',
+        title:       '⚠️ تم فتح نزاع على طلب',
+        body:        'فتح المشتري نزاعاً على أحد طلباتك — راجع التفاصيل ورد في أقرب وقت لتجنب التصعيد.',
+        resourceRef: `p2p_order:${event.orderId}`,
+      });
+    } catch (err: any) {
+      this.logger.error(`P2P notification failed (dispute opened): ${err.message}`);
+    }
+  }
   // ─── HIGH risk recommendation generated ───────────────────────────────────
 
   @OnEvent(EVENTS.RECOMMENDATION_GENERATED)

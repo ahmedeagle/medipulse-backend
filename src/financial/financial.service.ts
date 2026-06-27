@@ -174,4 +174,134 @@ export class FinancialService {
     s.approvedBy  = approvedBy;
     return this.settlementRepo.save(s);
   }
+
+  // ─── Financial Health Snapshot (AI Center / Orchestrator Layer 1) ────────────
+
+  /**
+   * Returns a structured financial health snapshot for a pharmacy tenant.
+   * Used by:
+   *   - ProcurementOrchestrator Layer 1 (financialRisk signal)
+   *   - AI Center DashboardTab (4 stat cards)
+   *
+   * All values in EGP. Single-pass raw queries — no N+1.
+   */
+  async getHealthSnapshot(tenantId: string): Promise<FinancialHealthSnapshot> {
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000);
+    const thirtyDaysFromNow = new Date(Date.now() + 30 * 86_400_000);
+
+    // Run all queries in parallel — independent signals
+    const [inventoryRows, deadStockRows, nearExpiryRows, payablesRows, wallet] =
+      await Promise.all([
+        // Total inventory value: sum(quantity × costPrice) per tenant
+        this.dataSource.query<Array<{ total_value: string }>>(
+          `
+          SELECT COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS total_value
+          FROM inventory_items i
+          WHERE i."tenantId" = $1
+            AND i.quantity > 0
+            AND i."deletedAt" IS NULL
+          `,
+          [tenantId],
+        ),
+
+        // Dead stock: items with 0 sales in last 90 days
+        this.dataSource.query<Array<{ dead_value: string; dead_skus: string }>>(
+          `
+          SELECT
+            COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS dead_value,
+            COUNT(DISTINCT i."productId")::text                              AS dead_skus
+          FROM inventory_items i
+          WHERE i."tenantId" = $1
+            AND i.quantity > 0
+            AND i."deletedAt" IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM sale_items si
+              JOIN sales s ON s.id = si."saleId"
+              WHERE si."productId" = i."productId"
+                AND s."tenantId"   = i."tenantId"
+                AND s."createdAt"  >= $2
+            )
+          `,
+          [tenantId, ninetyDaysAgo],
+        ),
+
+        // Near expiry: items expiring within 30 days
+        this.dataSource.query<Array<{ near_expiry_value: string; near_expiry_skus: string }>>(
+          `
+          SELECT
+            COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS near_expiry_value,
+            COUNT(DISTINCT i."productId")::text                              AS near_expiry_skus
+          FROM inventory_items i
+          WHERE i."tenantId" = $1
+            AND i.quantity > 0
+            AND i."deletedAt" IS NULL
+            AND i."expiryDate" IS NOT NULL
+            AND i."expiryDate" <= $2
+            AND i."expiryDate" > NOW()
+          `,
+          [tenantId, thirtyDaysFromNow],
+        ),
+
+        // Pending payables: outstanding orders not yet paid
+        this.dataSource.query<Array<{ pending_payables: string }>>(
+          `
+          SELECT COALESCE(SUM(o."totalAmount"), 0)::text AS pending_payables
+          FROM orders o
+          WHERE o."pharmacyTenantId" = $1
+            AND o.status NOT IN ('delivered', 'cancelled', 'rejected')
+          `,
+          [tenantId],
+        ),
+
+        this.getWallet(tenantId),
+      ]);
+
+    const totalInventoryValue  = parseFloat(inventoryRows[0]?.total_value ?? '0');
+    const deadStockValue       = parseFloat(deadStockRows[0]?.dead_value ?? '0');
+    const deadStockSkus        = parseInt(deadStockRows[0]?.dead_skus ?? '0', 10);
+    const nearExpiryValue      = parseFloat(nearExpiryRows[0]?.near_expiry_value ?? '0');
+    const nearExpirySkus       = parseInt(nearExpiryRows[0]?.near_expiry_skus ?? '0', 10);
+    const pendingPayables      = parseFloat(payablesRows[0]?.pending_payables ?? '0');
+    const creditLimit          = wallet ? Number(wallet.creditLimit) : 0;
+    const utilizedCredit       = wallet ? Number(wallet.utilizedCredit) : 0;
+    const utilizationRate      = creditLimit > 0 ? utilizedCredit / creditLimit : 0;
+
+    const deadStockPct = totalInventoryValue > 0
+      ? (deadStockValue / totalInventoryValue) * 100
+      : 0;
+
+    return {
+      totalInventoryValue,
+      deadStockValue,
+      deadStockSkus,
+      deadStockPct: Math.round(deadStockPct * 10) / 10,
+      nearExpiryValue,
+      nearExpirySkus,
+      pendingPayables,
+      creditLimit,
+      utilizedCredit,
+      utilizationRate: Math.round(utilizationRate * 1000) / 10, // as %
+      cashRisk: utilizationRate > 0.90 || wallet?.status !== 'active',
+      alerts: [
+        ...(deadStockPct > 30 ? ['مخزون راكد يتجاوز 30% من قيمة المخزون الكلي'] : []),
+        ...(nearExpirySkus > 0 ? [`${nearExpirySkus} صنف ينتهي خلال 30 يوماً`] : []),
+        ...(utilizationRate > 0.90 ? ['استخدام الائتمان يتجاوز 90%'] : []),
+      ],
+    };
+  }
+}
+
+export interface FinancialHealthSnapshot {
+  totalInventoryValue:  number;
+  deadStockValue:       number;
+  deadStockSkus:        number;
+  deadStockPct:         number;    // %
+  nearExpiryValue:      number;
+  nearExpirySkus:       number;
+  pendingPayables:      number;
+  creditLimit:          number;
+  utilizedCredit:       number;
+  utilizationRate:      number;    // % (0–100)
+  cashRisk:             boolean;
+  alerts:               string[];
 }

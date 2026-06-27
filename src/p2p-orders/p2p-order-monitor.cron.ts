@@ -93,12 +93,17 @@ export class P2pOrderMonitorCron {
                 AND o."reservationExpiresAt" IS NOT NULL
                 AND o."reservationExpiresAt" BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
           )
-          -- de-dup: skip if a pending/modified approval already exists for this order
+          -- de-dup: skip if ANY approval for this order was created in the last 24h
+          -- (prevents notification spam when the user dismisses/lets the approval
+          --  expire while the underlying order stays stale).
           AND NOT EXISTS (
             SELECT 1 FROM approvals a
             WHERE a."subjectType" = 'p2p_order_action'
               AND a."subjectId"   = o.id
-              AND a.status IN ('pending', 'modified')
+              AND (
+                a.status IN ('pending', 'modified')
+                OR a."createdAt" > NOW() - INTERVAL '24 hours'
+              )
           )
         LIMIT 100
       `);

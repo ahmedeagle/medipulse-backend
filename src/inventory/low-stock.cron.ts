@@ -133,13 +133,18 @@ export class LowStockCron {
 
     const rationale =
       `المخزون وصل للحد الأدنى. ` +
-      `عند الموافقة سيتحقق النظام من توفّر هذا المنتج في البورصة الدوائية المحلية ` +
-      `بسعر أفضل — وإن لم يتوفر، سيوجّهك لإنشاء طلب شراء من المورد.`;
+      `عند الموافقة سيتحقق النظام أولاً من توفّر هذا المنتج في البورصة الدوائية المحلية ` +
+      `(نفس مدينتك) بسعر أفضل — وإن لم يتوفر، سيُحوَّلك إلى "مركز الذكاء → المهام" ` +
+      `لمراجعة خطة الشراء الذكية من المورد الأنسب.`;
 
     await this.approvals.create(row.pharmacyTenantId, {
       agentCode:        'low_stock_replenishment',
       subjectType:      'low_stock',
       subjectId:        row.id,
+      // Central orchestration: collapses with any other restock signal
+      // (inventory_expert REORDER, smart_procurement p2p match, single
+      // procurement_draft) for the same product into ONE task card.
+      needKey:          `restock::${row.productId}`,
       title:            `نقص مخزون: ${productLabel}`,
       summary,
       rationale,

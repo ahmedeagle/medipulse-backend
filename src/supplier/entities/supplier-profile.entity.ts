@@ -46,6 +46,18 @@ export class SupplierProfile {
   @Column({ type: 'varchar', length: 20, nullable: true })
   phone: string;
 
+  /** Business email for PO confirmations, invoice corrections, dispute trail. */
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  email: string;
+
+  /**
+   * WhatsApp number (E.164, e.g. "+201234567890").
+   * Primary fast-channel for delivery coordination — most Egyptian/Saudi
+   * pharma suppliers respond to WhatsApp faster than to email or phone.
+   */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  whatsapp: string;
+
   @Column({ type: 'varchar', length: 255, nullable: true })
   website: string;
 

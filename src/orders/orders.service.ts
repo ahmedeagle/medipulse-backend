@@ -23,6 +23,7 @@ import {
   OrderDeliveredEvent,
   EVENTS,
 } from '../events/domain-events';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 
 // ── Complete enterprise state machine ─────────────────────────────────────────
 
@@ -75,8 +76,6 @@ const PHARMACY_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
   [OrderStatus.DISPUTED]:         [OrderStatus.RETURN_REQUESTED],
 };
 
-const SAR_VAT_RATE = 0.15;
-
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -98,6 +97,7 @@ export class OrdersService {
     private tenantRepo: Repository<Tenant>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    private readonly pharmacySettings: PharmacySettingsService,
   ) {}
 
   // ─── Read ─────────────────────────────────────────────────────────────────
@@ -130,6 +130,28 @@ export class OrdersService {
       .skip(filters.skip ?? 0)
       .getManyAndCount();
 
+    // ── Enrich each order with the supplier's contact channels so the UI can
+    // surface "Email / WhatsApp / Call" CTAs on the Orders screen. The data
+    // lives on supplier_profiles, keyed by supplierTenantId; one batched
+    // query covers the page regardless of supplier-count.
+    const supplierIds = [...new Set(data.map(o => o.supplierTenantId).filter(Boolean))];
+    if (supplierIds.length) {
+      const contacts: Array<{ supplierTenantId: string; phone: string | null; email: string | null; whatsapp: string | null }> =
+        await this.dataSource.query(
+          `SELECT "supplierTenantId", phone, email, whatsapp
+             FROM supplier_profiles
+            WHERE "supplierTenantId" = ANY($1::uuid[])`,
+          [supplierIds],
+        );
+      const byId = new Map(contacts.map(c => [c.supplierTenantId, c]));
+      for (const o of data) {
+        const c = byId.get(o.supplierTenantId);
+        (o as any).supplierContact = c
+          ? { phone: c.phone, email: c.email, whatsapp: c.whatsapp }
+          : { phone: null, email: null, whatsapp: null };
+      }
+    }
+
     return { data, total };
   }
 
@@ -140,7 +162,93 @@ export class OrdersService {
     });
     if (!order) throw new NotFoundException(`Order ${id} not found`);
     this.assertAccess(user, order);
+
+    // Same supplierContact enrichment as findAll
+    if (order.supplierTenantId) {
+      const rows: Array<{ phone: string | null; email: string | null; whatsapp: string | null }> =
+        await this.dataSource.query(
+          `SELECT phone, email, whatsapp FROM supplier_profiles WHERE "supplierTenantId" = $1 LIMIT 1`,
+          [order.supplierTenantId],
+        );
+      (order as any).supplierContact = rows[0] ?? { phone: null, email: null, whatsapp: null };
+    }
+
     return order;
+  }
+
+  /**
+   * Returns the AI plan-context for an order, if any:
+   *   - originDraftId         — the procurement_draft that produced this order
+   *   - planSnapshot          — full OrchestratorResult captured at draft creation
+   *   - supplierCity/buyerCity/sameCity — geographic context for explainability
+   *
+   * Returns null fields when the order was created manually (no upstream draft).
+   */
+  async getAiContext(user: { role: string; tenantId: string }, orderId: string): Promise<{
+    originDraftId: string | null;
+    planSnapshot:  Record<string, unknown> | null;
+    supplierCity:  string | null;
+    buyerCity:     string | null;
+    sameCity:      boolean | null;
+    splitSource:   'p2p' | 'supplier' | null;
+    suggestedQuantity: number | null;
+    unitPriceAtDraft:  number | null;
+  }> {
+    const order = await this.findOne(user, orderId);  // also enforces access
+
+    // Find the originating draft (if any). Both ai_plan and basket paths
+    // set `convertedOrderId` on the draft once the Order is materialised.
+    const [draft] = await this.dataSource.query<Array<{
+      id: string;
+      planSnapshot: Record<string, unknown> | null;
+      splitSource: 'p2p' | 'supplier' | null;
+      suggestedQuantity: number;
+      unitPrice: string;
+    }>>(
+      `SELECT id, "planSnapshot", "splitSource", "suggestedQuantity", "unitPrice"
+         FROM procurement_drafts
+        WHERE "convertedOrderId" = $1
+        ORDER BY "createdAt" DESC
+        LIMIT 1`,
+      [orderId],
+    );
+
+    // Resolve cities from seller_profiles (preferred — explicit) then fall
+    // back to tenants table.
+    const [cities] = await this.dataSource.query<Array<{
+      buyerCity:    string | null;
+      supplierCity: string | null;
+    }>>(
+      `SELECT
+         (SELECT COALESCE(sp.city, t.city)
+            FROM tenants t
+            LEFT JOIN seller_profiles sp ON sp."pharmacyTenantId" = t.id
+           WHERE t.id = $1 LIMIT 1)                                AS "buyerCity",
+         (SELECT COALESCE(sp.city, t.city)
+            FROM tenants t
+            LEFT JOIN seller_profiles sp ON sp."pharmacyTenantId" = t.id
+           WHERE t.id = $2 LIMIT 1)                                AS "supplierCity"
+      `,
+      [order.pharmacyTenantId, order.supplierTenantId],
+    );
+
+    const buyerCity    = cities?.buyerCity    ?? null;
+    const supplierCity = cities?.supplierCity ?? null;
+    const sameCity =
+      buyerCity && supplierCity
+        ? buyerCity.trim().toLowerCase() === supplierCity.trim().toLowerCase()
+        : null;
+
+    return {
+      originDraftId:     draft?.id ?? null,
+      planSnapshot:      draft?.planSnapshot ?? null,
+      supplierCity,
+      buyerCity,
+      sameCity,
+      splitSource:       draft?.splitSource ?? null,
+      suggestedQuantity: draft?.suggestedQuantity ?? null,
+      unitPriceAtDraft:  draft ? Number(draft.unitPrice) : null,
+    };
   }
 
   // ─── Create ───────────────────────────────────────────────────────────────
@@ -200,7 +308,10 @@ export class OrdersService {
     }
 
     const subtotalAmount = dto.items.reduce((sum, i) => sum + Number(i.quantity) * Number(i.unitPrice), 0);
-    const vatAmount      = Math.round(subtotalAmount * SAR_VAT_RATE * 100) / 100;
+    // Resolve currency + VAT from the tenant's settings (jurisdiction-aware)
+    // instead of hardcoding SAR/15%. EG=14%, KSA=15%, UAE/Oman=5%, etc.
+    const billing = await this.pharmacySettings.getBillingContext(pharmacyTenantId);
+    const vatAmount      = Math.round(subtotalAmount * billing.vatRate * 100) / 100;
     const totalAmount    = Math.round((subtotalAmount + vatAmount) * 100) / 100;
 
     // Check approval threshold
@@ -223,9 +334,9 @@ export class OrdersService {
         pharmacyTenantId,
         supplierTenantId:  dto.supplierTenantId,
         notes:             dto.notes,
-        currency:          'SAR',
+        currency:          billing.currency,
         subtotalAmount,
-        vatRate:           SAR_VAT_RATE,
+        vatRate:           billing.vatRate,
         vatAmount,
         totalAmount,
         status:            initialStatus,

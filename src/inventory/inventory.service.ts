@@ -19,6 +19,7 @@ import { CreateProductWithBatchDto } from './dto/create-product-with-batch.dto';
 import { InventoryUpdatedEvent, EVENTS } from '../events/domain-events';
 import { NotificationService } from '../notifications/notification.service';
 import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
+import { CatalogMatchingService } from './catalog-matching.service';
 import {
   normalizePagination,
   PaginatedResult,
@@ -36,12 +37,14 @@ export class InventoryService {
     private readonly notificationService: NotificationService,
     private readonly settingsSvc: PharmacySettingsService,
     private readonly dataSource: DataSource,
+    private readonly catalogMatching: CatalogMatchingService,
   ) {}
 
   async findAll(
     tenantId: string,
     pagination: PaginationQueryDto = {},
     q?: string,
+    linkStatus?: string,
   ): Promise<PaginatedResult<InventoryItem>> {
     const { limit, offset } = normalizePagination(pagination);
     const qb = this.inventoryItemRepository
@@ -58,8 +61,13 @@ export class InventoryService {
       );
     }
 
+    if (linkStatus) {
+      qb.andWhere('item.linkStatus = :linkStatus', { linkStatus });
+    }
+
     const [data, total] = await qb
-      .orderBy('product.name', 'ASC')
+      .orderBy('item.matchScore', 'DESC')
+      .addOrderBy('product.name', 'ASC')
       .take(limit)
       .skip(offset)
       .getManyAndCount();
@@ -158,6 +166,15 @@ export class InventoryService {
     });
   }
 
+  async countSuggested(tenantId: string): Promise<number> {
+    return this.inventoryItemRepository.count({
+      where: {
+        pharmacyTenantId: tenantId,
+        linkStatus: 'suggested' as any,
+      },
+    });
+  }
+
   async create(tenantId: string, dto: CreateInventoryItemDto): Promise<InventoryItem> {
     const product = await this.productRepository.findOne({
       where: { id: dto.productId },
@@ -173,21 +190,26 @@ export class InventoryService {
       quantity: dto.quantity,
       minThreshold: dto.minThreshold,
       expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : null,
-      // The user explicitly chose / created this catalog product, so the link
-      // is authoritative. We intentionally do NOT set a synthetic match score:
-      // a score is reserved for results from the AI matching engine. Direct
-      // selection is recorded via matchExplanation.reasonKey instead.
-      linkStatus: 'linked',
+      // Catalog products (requiresMapping=false): user explicitly chose this product → link is authoritative.
+      // Pharmacy-created products (requiresMapping=true): product is local-only, not yet matched to the
+      // central catalog. Start as 'unlinked' so the AI matching engine will process it immediately.
+      linkStatus: product.requiresMapping ? 'unlinked' : 'linked',
       matchScore: null,
       matchExplanation: {
-        reasonKey: 'direct_catalog_selection',
+        reasonKey: product.requiresMapping ? 'pharmacy_product_pending_match' : 'direct_catalog_selection',
         productId: product.id,
         requiresMapping: !!product.requiresMapping,
       } as any,
-      lastLinkedAt: new Date(),
+      lastLinkedAt: product.requiresMapping ? null : new Date(),
     });
 
     const saved = await this.inventoryItemRepository.save(item);
+
+    // For pharmacy-created products, kick off catalog matching immediately so the item
+    // surfaces in the "مقترح للمراجعة" filter without waiting for the nightly rematch job.
+    if (product.requiresMapping) {
+      this.catalogMatching.runForItem(tenantId, saved.id).catch(() => {});
+    }
 
     const result = await this.inventoryItemRepository.findOne({
       where: { id: saved.id },

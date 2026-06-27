@@ -136,6 +136,9 @@ export class DeadStockCron {
       agentCode:        'dead_stock_expert',
       subjectType:      'dead_stock_clearance',
       subjectId:        item.id,
+      // Same product liquidation need as expiry_liquidation / inventory
+      // expert dead-stock recommendation — collapse onto one card.
+      needKey:          `liquidate::${analysis.productId}`,
       title:            `مخزون راكد: ${analysis.productName}`,
       summary:          `${analysis.currentQuantity} وحدة لم تتحرك منذ ${weeks} أسبوع — نسبة الخطر ${Math.round(analysis.deadStockProbability * 100)}%`,
       rationale:

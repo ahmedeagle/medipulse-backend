@@ -9,6 +9,8 @@ import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Approval, ApprovalStatus } from '../ai-governance/entities/approval.entity';
 import { DashboardService } from '../ai-governance/dashboard.service';
 import { DeadStockService } from '../inventory/dead-stock.service';
+import { AiTokenBudget } from '../ai/governance/token-budget';
+import { ChatAnswerCache } from './chat-answer.cache';
 import {
   AskChatDto,
   ChatAnswer,
@@ -71,6 +73,20 @@ const CHAT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         properties: {
           limit: { type: 'number', description: 'Max items — default 10' },
         },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_reorder_recommendation',
+      description: 'Get the smart reorder recommendation for ONE specific product by name: how many units to buy, when to reorder, the cheapest available supplier, and the savings vs the most expensive supplier. Use when the user asks "how much should I order of X", "should I restock X", "كم أطلب من ...", "متى أعيد طلب ...".',
+      parameters: {
+        type: 'object',
+        properties: {
+          product: { type: 'string', description: 'Product name in Arabic or English (2–100 chars)' },
+        },
+        required: ['product'],
       },
     },
   },
@@ -180,6 +196,10 @@ const TOOL_ACTIONS: Record<string, ChatActionButton[]> = {
     { label: 'مراجعة طلبات الشراء',            route: '/pharmacy/ai-center?tab=approvals' },
     { label: 'عرض المخزون',                    route: '/pharmacy/inventory?filter=low_stock' },
   ],
+  get_reorder_recommendation: [
+    { label: 'مراجعة طلبات الشراء',            route: '/pharmacy/ai-center?tab=approvals' },
+    { label: 'عرض المخزون',                    route: '/pharmacy/inventory' },
+  ],
   get_dead_stock: [
     { label: 'أضف للمراجعة',                   actionType: 'suggest_dead_stock_review' },
     { label: 'عرض المخزون',                    route: '/pharmacy/inventory' },
@@ -266,6 +286,8 @@ export class ChatService {
     private readonly config: ConfigService,
     private readonly dashboard: DashboardService,
     private readonly deadStock: DeadStockService,
+    private readonly tokenBudget: AiTokenBudget,
+    private readonly answerCache: ChatAnswerCache,
   ) {
     const apiKey = this.config.get<string>('OPENAI_API_KEY');
     this.openai = apiKey ? new OpenAI({ apiKey, timeout: 12_000 }) : null;
@@ -285,6 +307,21 @@ export class ChatService {
     }
     if (!question.trim()) {
       return { type: 'not_configured', question: '' };
+    }
+
+    // Cache check — same tenant + same normalised question within 5 min
+    // returns the prior answer for zero tokens and zero DB load.
+    const cached = await this.answerCache.get(tenantId, question);
+    if (cached) {
+      this.logger.debug({ event: 'chat.cache_hit', tenantId, qHash: hashQ(question) });
+      return cached;
+    }
+
+    // Per-tenant chat budget — independent of procurement budget so a
+    // runaway chat loop cannot starve the recommendation engine.
+    if (!(await this.tokenBudget.hasBudget(tenantId, 'chat'))) {
+      this.logger.warn(`[${tenantId}] daily chat token budget exhausted`);
+      return { type: 'error', message: 'تم الوصول للحد اليومي للاستخدام. حاول مرة أخرى غداً.' };
     }
 
     const startMs = Date.now();
@@ -346,8 +383,17 @@ export class ChatService {
       const text = round2.choices[0]?.message?.content?.trim() ?? '';
       if (!text) return { type: 'error', message: 'لم يُرجع النموذج استجابة. حاول مرة أخرى.' };
 
+      // Record tokens against the chat bucket (fire-and-forget) and cache
+      // the final answer for the next 5 minutes.
+      const inputTokens  = (round1.usage?.prompt_tokens     ?? 0) + (round2.usage?.prompt_tokens     ?? 0);
+      const outputTokens = (round1.usage?.completion_tokens ?? 0) + (round2.usage?.completion_tokens ?? 0);
+      void this.tokenBudget.record(tenantId, inputTokens, outputTokens, 'chat');
+
+      const answer: ChatAnswer = { type: 'answer', text, cards, actions: TOOL_ACTIONS[fnName] ?? [] };
+      void this.answerCache.set(tenantId, question, answer);
+
       this.auditLog({ tenantId, qHash: hashQ(question), tool: fnName, latencyMs: Date.now() - startMs });
-      return { type: 'answer', text, cards, actions: TOOL_ACTIONS[fnName] ?? [] };
+      return answer;
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -406,6 +452,8 @@ export class ChatService {
         return this.toolExpiryAlerts(tenantId, safeInt(args.days, 90, 1, 365), safeInt(args.limit, 10));
       case 'get_low_stock_items':
         return this.toolLowStockItems(tenantId, safeInt(args.limit, 10));
+      case 'get_reorder_recommendation':
+        return this.toolGetReorderRecommendation(tenantId, String(args.product ?? ''));
       case 'get_dead_stock':
         return this.toolDeadStock(tenantId, safeInt(args.limit, 10));
       case 'get_pending_ai_tasks':
@@ -930,6 +978,125 @@ export class ChatService {
       rows: items.map((i) => ({ name: i.name, qty: i.qty, expiry: fmtDate(i.expiryDate) })),
     }] : [];
     return { toolResult: { query: q, count: items.length, items }, cards };
+  }
+
+  // ── Tool 10: Smart reorder recommendation for ONE product ─────────────────
+  // Answers "how much should I order of X / when / which supplier is cheapest".
+  // Combines the demand-based EOQ schedule (qty + reorder timing) with a live
+  // supplier price comparison. Read-only; tenant-scoped; no LLM math.
+  private async toolGetReorderRecommendation(tenantId: string, query: string) {
+    const q = query.trim();
+    if (q.length < 2 || q.length > 100) {
+      return { toolResult: { found: false, reason: 'invalid_query' }, cards: [] };
+    }
+
+    const rows = await this.dataSource.query<{
+      product_id: string; name: string; qty: string; min_threshold: string;
+      eoq_qty: string | null; reorder_point: string | null; days_until_reorder: string | null;
+    }[]>(`
+      SELECT i."productId"                    AS product_id,
+             COALESCE(p."nameAr", p.name)     AS name,
+             i.quantity                       AS qty,
+             i."minThreshold"                 AS min_threshold,
+             s."eoqQty"::text                 AS eoq_qty,
+             s."reorderPoint"::text           AS reorder_point,
+             s."daysUntilReorderNeeded"::text AS days_until_reorder
+      FROM   inventory_items i
+      JOIN   products p ON p.id = i."productId"
+      LEFT JOIN procurement_schedules s
+             ON s."productId" = i."productId" AND s."tenantId" = $1
+      WHERE  i."pharmacyTenantId" = $1
+        AND  i."deletedAt" IS NULL
+        AND  (p.name ILIKE $2 OR p."nameAr" ILIKE $2)
+      ORDER BY i.quantity ASC
+      LIMIT 1
+    `, [tenantId, `%${q}%`]);
+
+    if (!rows.length) {
+      return { toolResult: { found: false, query: q }, cards: [] };
+    }
+
+    const r            = rows[0];
+    const qty          = Number(r.qty) || 0;
+    const minThreshold = Number(r.min_threshold) || 0;
+    const eoqQty       = r.eoq_qty ? Math.ceil(Number(r.eoq_qty)) : 0;
+    const reorderPoint = r.reorder_point ? Math.ceil(Number(r.reorder_point)) : 0;
+    const daysUntil    = r.days_until_reorder != null ? Number(r.days_until_reorder) : null;
+
+    // Effective trigger = max(manual floor, demand-based reorder point).
+    const trigger      = Math.max(minThreshold, reorderPoint);
+    const suggestedQty = eoqQty > 0
+      ? eoqQty
+      : Math.max(0, trigger - qty) + Math.ceil(trigger * 0.5);
+
+    // Live supplier price comparison.
+    const supRows = await this.dataSource.query<{
+      cheapest: string | null; dearest: string | null; active_suppliers: string;
+    }[]>(`
+      SELECT MIN(CASE WHEN sc."isAvailable" AND sc.stock > 0 THEN sc.price END)::text AS cheapest,
+             MAX(CASE WHEN sc."isAvailable" AND sc.stock > 0 THEN sc.price END)::text AS dearest,
+             COUNT(DISTINCT CASE WHEN sc."isAvailable" AND sc.stock > 0 THEN sc."supplierTenantId" END)::text AS active_suppliers
+      FROM supplier_catalog sc
+      WHERE sc."productId" = $1 AND sc."deletedAt" IS NULL
+    `, [r.product_id]);
+
+    const cheapest        = supRows[0]?.cheapest ? Number(supRows[0].cheapest) : null;
+    const dearest         = supRows[0]?.dearest ? Number(supRows[0].dearest) : null;
+    const activeSuppliers = Number(supRows[0]?.active_suppliers ?? 0);
+    const savingsPct      = cheapest != null && dearest != null && dearest > cheapest
+      ? Math.round(((dearest - cheapest) / dearest) * 100)
+      : 0;
+
+    let bestSupplier: { name: string; price: number } | null = null;
+    if (cheapest != null) {
+      const bsRows = await this.dataSource.query<{ supplier_name: string; price: string }[]>(`
+        SELECT t.name AS supplier_name, sc.price::text AS price
+        FROM supplier_catalog sc
+        JOIN tenants t ON t.id = sc."supplierTenantId"
+        WHERE sc."productId" = $1 AND sc."isAvailable" = true AND sc.stock > 0 AND sc."deletedAt" IS NULL
+        ORDER BY sc.price ASC
+        LIMIT 1
+      `, [r.product_id]);
+      if (bsRows.length) bestSupplier = { name: bsRows[0].supplier_name, price: Number(bsRows[0].price) };
+    }
+
+    const facts: { label: string; value: string }[] = [
+      { label: 'المتوفر حالياً',           value: `${qty} وحدة` },
+      { label: 'الكمية المقترحة للشراء',     value: `${suggestedQty} وحدة` },
+    ];
+    if (daysUntil != null) {
+      facts.push({ label: 'يُنصح بإعادة الطلب خلال', value: daysUntil <= 0 ? 'الآن' : `${daysUntil} يوم` });
+    }
+    if (bestSupplier) {
+      facts.push({ label: 'أفضل مورد', value: `${bestSupplier.name} — ${fmtEgp(bestSupplier.price)}` });
+    }
+    if (savingsPct > 0) {
+      facts.push({ label: 'توفير مقارنة بأغلى مورد', value: `${savingsPct}%` });
+    }
+
+    const cards: ResponseCard[] = [{
+      type: 'table',
+      title: `توصية إعادة الطلب: ${r.name}`,
+      columns: [
+        { key: 'label', header: 'البند' },
+        { key: 'value', header: 'القيمة', align: 'end' as const },
+      ],
+      rows: facts,
+    }];
+
+    return {
+      toolResult: {
+        found: true,
+        productName: r.name,
+        currentQuantity: qty,
+        suggestedReorderQty: suggestedQty,
+        reorderWithinDays: daysUntil,
+        activeSuppliers,
+        bestSupplier,
+        savingsPct,
+      },
+      cards,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
-  Repository, DataSource, EntityManager, IsNull,
+  Repository, DataSource, EntityManager, IsNull, In,
 } from 'typeorm';
 import { Response } from 'express';
 import * as ExcelJS from 'exceljs';
@@ -18,6 +18,8 @@ import { CreateInvoiceDto }    from './dto/create-invoice.dto';
 import { UpdateInvoiceDto }    from './dto/update-invoice.dto';
 import { CreateReturnDto }     from './dto/create-return.dto';
 import { InvoiceQueryDto, ReturnQueryDto } from './dto/invoice-query.dto';
+import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
+import { NotificationService } from '../notifications/notification.service';
 
 const FIELD_LABELS: Record<string, string> = {
   supplierName:          'اسم المورد',
@@ -49,6 +51,8 @@ export class PurchasesService {
     @InjectRepository(PurchaseInvoiceChangelog)
     private readonly changelogRepo: Repository<PurchaseInvoiceChangelog>,
     private readonly dataSource: DataSource,
+    private readonly pharmacySettings: PharmacySettingsService,
+    private readonly notificationSvc: NotificationService,
   ) {}
 
   private async writeChangelog(
@@ -82,73 +86,122 @@ export class PurchasesService {
   }
 
   // ─── PO / RPO numbering (atomic per-tenant) ─────────────────────────────────
+  //
+  // Backed by `tenant_po_counters` (migration 1780706000000). The previous
+  // implementation locked every row in purchase_invoices/purchase_returns
+  // for the tenant via `SELECT … FOR UPDATE`, serializing invoice creation
+  // across the whole pharmacy. The counter table is a single-row UPSERT
+  // that holds a row lock for microseconds.
 
   private async nextPoNumber(tenantId: string, em: EntityManager): Promise<{ poNumber: string; poSequence: number }> {
-    // FOR UPDATE cannot be used with aggregate functions — lock individual rows via subquery
-    await em.query(
-      `SELECT id FROM purchase_invoices WHERE "pharmacyTenantId" = $1 FOR UPDATE`,
-      [tenantId],
-    );
     const row = await em.query(
-      `SELECT COALESCE(MAX("poSequence"), 0) AS max_seq
-       FROM purchase_invoices
-       WHERE "pharmacyTenantId" = $1`,
+      `INSERT INTO "tenant_po_counters" ("tenantId", "lastPo", "lastRpo", "updatedAt")
+         VALUES ($1, 1, 0, now())
+       ON CONFLICT ("tenantId") DO UPDATE SET
+         "lastPo" = "tenant_po_counters"."lastPo" + 1,
+         "updatedAt" = now()
+       RETURNING "lastPo" AS seq`,
       [tenantId],
     );
-    const seq = Number(row[0].max_seq) + 1;
+    const seq = Number(row[0].seq);
     const year = new Date().getFullYear();
     return { poNumber: `PO-${year}-${String(seq).padStart(5, '0')}`, poSequence: seq };
   }
 
   private async nextRpoNumber(tenantId: string, em: EntityManager): Promise<{ rpoNumber: string; rpoSequence: number }> {
-    await em.query(
-      `SELECT id FROM purchase_returns WHERE "pharmacyTenantId" = $1 FOR UPDATE`,
-      [tenantId],
-    );
     const row = await em.query(
-      `SELECT COALESCE(MAX("rpoSequence"), 0) AS max_seq
-       FROM purchase_returns
-       WHERE "pharmacyTenantId" = $1`,
+      `INSERT INTO "tenant_po_counters" ("tenantId", "lastPo", "lastRpo", "updatedAt")
+         VALUES ($1, 0, 1, now())
+       ON CONFLICT ("tenantId") DO UPDATE SET
+         "lastRpo" = "tenant_po_counters"."lastRpo" + 1,
+         "updatedAt" = now()
+       RETURNING "lastRpo" AS seq`,
       [tenantId],
     );
-    const seq = Number(row[0].max_seq) + 1;
+    const seq = Number(row[0].seq);
     const year = new Date().getFullYear();
     return { rpoNumber: `RPO-${year}-${String(seq).padStart(5, '0')}`, rpoSequence: seq };
   }
 
   // ─── Line totals calc ────────────────────────────────────────────────────────
 
+  /**
+   * Money-safe round to 2 decimal places. Uses `Math.round(x * 100) / 100`
+   * which avoids the silent precision loss of `+x.toFixed(2)` when chained
+   * across many additions. Negative inputs are clamped to 0 — pharmacy
+   * invoices never carry credit-style negative line totals.
+   */
+  private money(n: number): number {
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.round(n * 100) / 100;
+  }
+
   private calcLineTotals(lines: any[]): { subtotal: number; totalTax: number } {
     let subtotal = 0;
     let totalTax = 0;
     for (const l of lines) {
-      const qty = l.purchaseQty ?? 0;
-      const price = l.purchasePrice ?? 0;
-      const discPct = l.discountPct ?? 0;
-      const taxPct = l.taxPct ?? 0;
-      const base = qty * price;
-      const discAmount = base * (discPct / 100);
-      const afterDisc = base - discAmount;
-      const tax = afterDisc * (taxPct / 100);
-      l.taxAmount = +tax.toFixed(2);
-      l.lineTotal = +(afterDisc + tax).toFixed(2);
-      subtotal += afterDisc;
-      totalTax += tax;
+      // Defensive coercion + clamp — guards against malformed OCR or
+      // hand-edited DTO payloads that could otherwise produce a negative or
+      // NaN grand total.
+      const qty       = Math.max(0, Number(l.purchaseQty) || 0);
+      const price     = Math.max(0, Number(l.purchasePrice) || 0);
+      const discPct   = Math.min(100, Math.max(0, Number(l.discountPct) || 0));
+      const taxPct    = Math.max(0,             Number(l.taxPct)      || 0);
+
+      // Round every intermediate at the cent boundary so the persisted
+      // line totals equal the visible line totals; summing rounded values
+      // keeps the grand total identical to what the user sees on screen.
+      const base       = this.money(qty * price);
+      const discAmount = this.money(base * (discPct / 100));
+      const afterDisc  = this.money(base - discAmount);
+      const tax        = this.money(afterDisc * (taxPct / 100));
+
+      l.taxAmount = tax;
+      l.lineTotal = this.money(afterDisc + tax);
+      subtotal   += afterDisc;
+      totalTax   += tax;
     }
-    return { subtotal: +subtotal.toFixed(2), totalTax: +totalTax.toFixed(2) };
+    return { subtotal: this.money(subtotal), totalTax: this.money(totalTax) };
   }
 
   private calcInvoiceTotals(
     lines: any[],
     discountType: string,
     discountValue: number,
+    vatMode: 'tax_on_net' | 'tax_on_gross' = 'tax_on_net',
   ) {
     const { subtotal, totalTax } = this.calcLineTotals(lines);
+    const dv = Math.max(0, Number(discountValue) || 0);
     const totalDiscount = discountType === 'percent'
-      ? +(subtotal * (discountValue / 100)).toFixed(2)
-      : +Math.min(discountValue, subtotal).toFixed(2);
-    const grandTotal = +(subtotal - totalDiscount + totalTax).toFixed(2);
-    return { subtotal, totalTax, totalDiscount, grandTotal };
+      ? this.money(subtotal * (Math.min(100, dv) / 100))
+      : this.money(Math.min(dv, subtotal));
+
+    // VAT model selection — see TaxSettings.vatCalculationMode docs.
+    //  tax_on_net (default, EG/GCC): invoice-level discount also reduces VAT.
+    //    We scale the per-line tax pro-rata against the post-discount subtotal
+    //    so each line still carries an accurate `taxAmount` (used by reports).
+    //  tax_on_gross: legacy behaviour — VAT stays on pre-discount subtotal.
+    let adjustedTax = totalTax;
+    if (vatMode === 'tax_on_net' && totalDiscount > 0 && subtotal > 0) {
+      const taxableAfterInvDisc = this.money(subtotal - totalDiscount);
+      const effectiveTaxRate    = totalTax / subtotal;
+      adjustedTax               = this.money(taxableAfterInvDisc * effectiveTaxRate);
+      // Re-distribute the adjustment proportionally across line.taxAmount so
+      // per-line reports stay consistent with the invoice grand total.
+      if (totalTax > 0) {
+        const ratio = adjustedTax / totalTax;
+        for (const l of lines) {
+          const oldTax    = Number(l.taxAmount) || 0;
+          const afterDisc = (Number(l.lineTotal) || 0) - oldTax;
+          const newTax    = this.money(oldTax * ratio);
+          l.taxAmount = newTax;
+          l.lineTotal = this.money(afterDisc + newTax);
+        }
+      }
+    }
+
+    const grandTotal = this.money(subtotal - totalDiscount + adjustedTax);
+    return { subtotal, totalTax: adjustedTax, totalDiscount, grandTotal };
   }
 
   // ─── Price anomaly check ─────────────────────────────────────────────────────
@@ -309,7 +362,14 @@ export class PurchasesService {
         lineTotal: 0,
       }));
 
-      const totals = this.calcInvoiceTotals(lines, dto.discountType ?? 'percent', dto.discountValue ?? 0);
+      const settings = await this.pharmacySettings.getSettings(tenantId);
+      const vatMode  = settings.taxSettings?.vatCalculationMode ?? 'tax_on_net';
+      const totals = this.calcInvoiceTotals(
+        lines,
+        dto.discountType ?? 'percent',
+        dto.discountValue ?? 0,
+        vatMode,
+      );
 
       const invoice = em.create(PurchaseInvoice, {
         pharmacyTenantId: tenantId,
@@ -529,7 +589,9 @@ export class PurchasesService {
 
       const discountType  = dto.discountType  ?? invoice.discountType;
       const discountValue = dto.discountValue ?? invoice.discountValue;
-      const totals = this.calcInvoiceTotals(lines, discountType, discountValue);
+      const settings      = await this.pharmacySettings.getSettings(tenantId);
+      const vatMode       = settings.taxSettings?.vatCalculationMode ?? 'tax_on_net';
+      const totals        = this.calcInvoiceTotals(lines, discountType, discountValue, vatMode);
 
       await em.delete(PurchaseInvoiceLine, { invoiceId: id });
 
@@ -658,23 +720,46 @@ export class PurchasesService {
 
   private async syncWishListAfterReceive(em: EntityManager, tenantId: string, productIds: string[]) {
     if (!productIds.length) return;
-    for (const productId of productIds) {
-      const row = await em.query(
-        `SELECT COALESCE(SUM(quantity),0) AS total FROM inventory_items
-         WHERE "pharmacyTenantId" = $1 AND "productId" = $2 AND "deletedAt" IS NULL`,
-        [tenantId, productId],
-      );
-      const stock = Number(row[0]?.total ?? 0);
-      const wish = await em.findOne(WishListItem, {
-        where: { pharmacyTenantId: tenantId, productId },
-      });
-      if (wish && stock >= wish.requestedQty) {
-        await em.remove(WishListItem, wish);
-      } else if (wish) {
-        wish.currentStock = stock;
-        await em.save(WishListItem, wish);
+
+    // Dedupe — confirmInvoice may pass the same productId across multiple
+    // batches/lines.
+    const uniqueIds = Array.from(new Set(productIds));
+
+    // 1) Fetch current stock for every affected product in ONE query.
+    const stockRows: Array<{ productId: string; total: string }> = await em.query(
+      `SELECT "productId", COALESCE(SUM(quantity), 0) AS total
+         FROM inventory_items
+        WHERE "pharmacyTenantId" = $1
+          AND "productId" = ANY($2::uuid[])
+          AND "deletedAt" IS NULL
+        GROUP BY "productId"`,
+      [tenantId, uniqueIds],
+    );
+    const stockByProduct = new Map<string, number>();
+    for (const r of stockRows) stockByProduct.set(r.productId, Number(r.total ?? 0));
+
+    // 2) Fetch all relevant wishlist rows in ONE query.
+    const wishes = await em.find(WishListItem, {
+      where: { pharmacyTenantId: tenantId, productId: In(uniqueIds) },
+    });
+    if (wishes.length === 0) return;
+
+    // 3) Partition into "fulfilled → delete" vs "still needed → update".
+    const toDelete: WishListItem[] = [];
+    const toUpdate: WishListItem[] = [];
+    for (const w of wishes) {
+      const stock = stockByProduct.get(w.productId) ?? 0;
+      if (stock >= w.requestedQty) {
+        toDelete.push(w);
+      } else if (w.currentStock !== stock) {
+        w.currentStock = stock;
+        toUpdate.push(w);
       }
     }
+
+    // 4) Bulk delete + bulk save in at most two more round-trips.
+    if (toDelete.length) await em.remove(WishListItem, toDelete);
+    if (toUpdate.length) await em.save(WishListItem, toUpdate);
   }
 
   async markInvoicePaid(tenantId: string, id: string, userId?: string) {
@@ -775,26 +860,53 @@ export class PurchasesService {
       let subtotal = 0;
       let totalTax = 0;
       for (const l of lines) {
-        const qty = l.returnQty ?? 0;
-        const price = l.returnPrice ?? 0;
-        const discPct = l.discountPct ?? 0;
-        const taxPct = l.taxPct ?? 0;
-        const base = qty * price;
-        const discAmount = base * (discPct / 100);
-        const afterDisc = base - discAmount;
-        const tax = afterDisc * (taxPct / 100);
-        l.taxAmount = +tax.toFixed(2);
-        l.lineTotal = +(afterDisc + tax).toFixed(2);
-        subtotal += afterDisc;
-        totalTax += tax;
+        // Same precision + clamp guards as invoices; returns must mirror
+        // invoice math so a refund never rounds against the pharmacy.
+        const qty       = Math.max(0, Number(l.returnQty)    || 0);
+        const price     = Math.max(0, Number(l.returnPrice)  || 0);
+        const discPct   = Math.min(100, Math.max(0, Number(l.discountPct) || 0));
+        const taxPct    = Math.max(0,             Number(l.taxPct)      || 0);
+
+        const base       = this.money(qty * price);
+        const discAmount = this.money(base * (discPct / 100));
+        const afterDisc  = this.money(base - discAmount);
+        const tax        = this.money(afterDisc * (taxPct / 100));
+
+        l.taxAmount = tax;
+        l.lineTotal = this.money(afterDisc + tax);
+        subtotal   += afterDisc;
+        totalTax   += tax;
       }
 
-      const discountValue = dto.discountValue ?? 0;
-      const discountType = dto.discountType ?? 'percent';
+      const discountValueRaw = Math.max(0, Number(dto.discountValue) || 0);
+      const discountType     = dto.discountType ?? 'percent';
+      const discountValue    = discountType === 'percent'
+        ? Math.min(100, discountValueRaw)
+        : discountValueRaw;
       const totalDiscount = discountType === 'percent'
-        ? +(subtotal * (discountValue / 100)).toFixed(2)
-        : +Math.min(discountValue, subtotal).toFixed(2);
-      const grandTotal = +(subtotal - totalDiscount + totalTax).toFixed(2);
+        ? this.money(subtotal * (discountValue / 100))
+        : this.money(Math.min(discountValue, subtotal));
+
+      // Mirror invoice VAT model so refund tax matches the original charge.
+      const settings = await this.pharmacySettings.getSettings(tenantId);
+      const vatMode  = settings.taxSettings?.vatCalculationMode ?? 'tax_on_net';
+      let adjustedTax = this.money(totalTax);
+      if (vatMode === 'tax_on_net' && totalDiscount > 0 && subtotal > 0) {
+        const taxableAfterInvDisc = this.money(subtotal - totalDiscount);
+        const effectiveTaxRate    = totalTax / subtotal;
+        adjustedTax               = this.money(taxableAfterInvDisc * effectiveTaxRate);
+        if (totalTax > 0) {
+          const ratio = adjustedTax / totalTax;
+          for (const l of lines) {
+            const oldTax    = Number(l.taxAmount) || 0;
+            const afterDisc = (Number(l.lineTotal) || 0) - oldTax;
+            const newTax    = this.money(oldTax * ratio);
+            l.taxAmount = newTax;
+            l.lineTotal = this.money(afterDisc + newTax);
+          }
+        }
+      }
+      const grandTotal = this.money(subtotal - totalDiscount + adjustedTax);
 
       const ret = em.create(PurchaseReturn, {
         pharmacyTenantId: tenantId,
@@ -809,9 +921,9 @@ export class PurchasesService {
         status: 'draft',
         discountType,
         discountValue,
-        subtotal: +subtotal.toFixed(2),
+        subtotal: this.money(subtotal),
         totalDiscount,
-        totalTax: +totalTax.toFixed(2),
+        totalTax: adjustedTax,
         grandTotal,
         notes: dto.notes ?? null,
         createdBy: userId,
@@ -982,52 +1094,193 @@ export class PurchasesService {
     });
     if (!items.length) throw new BadRequestException('No wish list items found');
 
-    // Group by supplier
-    const groups = new Map<string, { supplierName: string; supplierId: string | null; items: WishListItem[] }>();
+    // ── Skip items that already have a live draft PO (prevents accidental
+    // duplicate purchases when "Create POs for all" is clicked multiple times).
+    // An item is "still pending" if its draftPoId points to a non-cancelled
+    // purchase_invoices row. Once the invoice is received, syncWishListAfterReceive
+    // removes the wish list item entirely, so this check is sufficient.
+    const eligible: WishListItem[] = [];
+    const skipped: { item: WishListItem; draftPoNumber: string }[] = [];
+    const draftIds = items.filter(i => i.draftPoId).map(i => i.draftPoId!) as string[];
+    const liveDrafts = draftIds.length
+      ? await this.invoiceRepo.find({
+          where: { id: In(draftIds), pharmacyTenantId: tenantId },
+          select: ['id', 'poNumber', 'status'],
+        })
+      : [];
+    const liveDraftIds = new Set(
+      liveDrafts.filter(d => d.status !== 'cancelled').map(d => d.id),
+    );
+
     for (const item of items) {
+      if (item.draftPoId && liveDraftIds.has(item.draftPoId)) {
+        skipped.push({ item, draftPoNumber: item.draftPoNumber ?? '' });
+      } else {
+        eligible.push(item);
+      }
+    }
+
+    if (!eligible.length) {
+      throw new BadRequestException(
+        `كل المنتجات المحددة لديها فواتير مسودة قائمة بالفعل (${skipped.length}). ` +
+        `قم بمراجعة المسودات أو حذفها قبل إنشاء طلبات جديدة.`,
+      );
+    }
+
+    // ── Resolve best supplier + current quoted price for any item missing
+    // a `lastSupplierId`. The wish-list nightly cron only sets supplier info
+    // when it can derive it from past purchases; manually-added items often
+    // arrive without a supplier and would otherwise produce an empty bill
+    // labelled "غير محدد". We pick the supplier with the highest reliability
+    // score and lowest current price — same heuristic ProcurementDraftService
+    // uses, so the two pathways stay consistent for the user.
+    const missingProductIds = eligible
+      .filter(i => !i.lastSupplierId)
+      .map(i => i.productId);
+
+    const priceByProductSupplier = new Map<string, number>();   // key = pid::sid
+    if (missingProductIds.length) {
+      const rows: Array<{ productId: string; supplierTenantId: string; supplierName: string; price: number }> =
+        await this.dataSource.query(
+          `SELECT DISTINCT ON (c."productId")
+                  c."productId",
+                  c."supplierTenantId",
+                  COALESCE(t.name, 'مورد') AS "supplierName",
+                  c.price::float AS price
+             FROM supplier_catalog c
+             LEFT JOIN tenants t ON t.id = c."supplierTenantId"
+            WHERE c."productId" = ANY($1::uuid[])
+              AND c."isAvailable" = true
+              AND c."deletedAt" IS NULL
+            ORDER BY c."productId", c.price ASC`,
+          [missingProductIds],
+        );
+      const bestByProduct = new Map(rows.map(r => [r.productId, r]));
+      const resolvedItems: WishListItem[] = [];
+      for (const item of eligible) {
+        if (!item.lastSupplierId) {
+          const best = bestByProduct.get(item.productId);
+          if (best) {
+            item.lastSupplierId   = best.supplierTenantId;
+            item.lastSupplierName = best.supplierName;
+            priceByProductSupplier.set(`${item.productId}::${best.supplierTenantId}`, Number(best.price));
+            resolvedItems.push(item);
+          }
+        }
+      }
+      // Persist enrichment in one bulk write so the UI shows real suppliers next
+      // refresh (avoids one UPDATE round-trip per resolved item).
+      if (resolvedItems.length) await this.wishListRepo.save(resolvedItems);
+    }
+
+    // Also fetch prices for items that already had a supplier — we want every
+    // line to start with a real cost so the invoice isn't a "zero bill".
+    const knownPairs = eligible
+      .filter(i => i.lastSupplierId && !priceByProductSupplier.has(`${i.productId}::${i.lastSupplierId}`))
+      .map(i => ({ productId: i.productId, supplierTenantId: i.lastSupplierId! }));
+    if (knownPairs.length) {
+      const productIds  = [...new Set(knownPairs.map(p => p.productId))];
+      const supplierIds = [...new Set(knownPairs.map(p => p.supplierTenantId))];
+      const priceRows: Array<{ productId: string; supplierTenantId: string; price: number }> =
+        await this.dataSource.query(
+          `SELECT "productId","supplierTenantId", price::float AS price
+             FROM supplier_catalog
+            WHERE "productId" = ANY($1::uuid[])
+              AND "supplierTenantId" = ANY($2::uuid[])
+              AND "isAvailable" = true
+              AND "deletedAt" IS NULL`,
+          [productIds, supplierIds],
+        );
+      for (const r of priceRows) {
+        priceByProductSupplier.set(`${r.productId}::${r.supplierTenantId}`, Number(r.price));
+      }
+    }
+
+    // Group eligible items by (now-resolved) supplier
+    const groups = new Map<string, { supplierName: string; supplierId: string | null; items: WishListItem[] }>();
+    for (const item of eligible) {
       const key = item.lastSupplierId ?? '_unknown';
       if (!groups.has(key)) {
         groups.set(key, {
-          supplierName: item.lastSupplierName ?? 'غير محدد',
+          supplierName: item.lastSupplierName ?? 'مورد غير محدد',
           supplierId: item.lastSupplierId ?? null,
           items: [],
         });
       }
-      groups.get(key).items.push(item);
+      groups.get(key)!.items.push(item);
     }
 
     const created: PurchaseInvoice[] = [];
+    const taggedItems: WishListItem[] = [];
     for (const [, group] of groups) {
-      const lines = group.items.map((item, i) => ({
-        productId: item.productId,
-        productName: item.productName,
-        productSku: item.productSku ?? null,
-        purchaseQty: item.requestedQty,
-        purchasePrice: 0,
-        sortOrder: i,
-        taxAmount: 0,
-        lineTotal: 0,
-      }));
+      const lines = group.items.map((item, i) => {
+        const price = group.supplierId
+          ? (priceByProductSupplier.get(`${item.productId}::${group.supplierId}`) ?? 0)
+          : 0;
+        return {
+          productId: item.productId,
+          productName: item.productName,
+          productSku: item.productSku ?? null,
+          purchaseQty: item.requestedQty,
+          purchasePrice: price,
+          sortOrder: i,
+          taxAmount: 0,
+          lineTotal: 0,
+        };
+      });
 
       const inv = await this.createInvoice(tenantId, {
         supplierTenantId: group.supplierId,
         supplierName: group.supplierName,
         discountType: 'percent',
         discountValue: 0,
+        notes: 'تم إنشاؤها تلقائياً من قائمة الأمنيات — راجع الأسعار قبل التأكيد.',
         lines: lines as any,
       }, userId);
 
-      // Tag wish list items with draft PO
+      // Tag wish list items with the new draft PO so subsequent clicks skip them
       for (const item of group.items) {
         item.draftPoId = inv.id;
         item.draftPoNumber = inv.poNumber;
-        await this.wishListRepo.save(item);
+        taggedItems.push(item);
       }
 
       created.push(inv);
     }
+    // Bulk-persist all draft-PO tags in a single write instead of one per item.
+    if (taggedItems.length) await this.wishListRepo.save(taggedItems);
 
-    return created;
+    // ── Notify the pharmacy that draft purchase orders were generated, and
+    // flag any items we couldn't match to a supplier so the buyer follows up
+    // manually instead of silently shipping an empty "غير محدد" bill (G1+G2).
+    const unresolvedCount = groups.get('_unknown')?.items.length ?? 0;
+    try {
+      const parts: string[] = [`تم إنشاء ${created.length} طلب شراء مسودة من قائمة الأمنيات.`];
+      if (unresolvedCount > 0) {
+        parts.push(`${unresolvedCount} منتج لم نتمكن من تحديد مورد له تلقائياً — افتح المسودة وأضف المورد والسعر يدوياً.`);
+      }
+      parts.push('راجع الأسعار والكميات ثم أكّد الطلبات.');
+      await this.notificationSvc.create({
+        tenantId:    tenantId,
+        userId:      userId ?? undefined,
+        type:        'draft_created',
+        title:       unresolvedCount > 0 ? 'طلبات شراء مسودة — تحتاج مراجعة' : 'تم إنشاء طلبات شراء مسودة',
+        body:        parts.join(' '),
+        resourceRef: created.length === 1 ? `purchase_invoice:${created[0].id}` : undefined,
+      });
+    } catch (err: any) {
+      this.logger.warn(`wish-list draft notification failed: ${err.message}`);
+    }
+
+    return {
+      invoices: created,
+      createdCount: created.length,
+      skippedCount: skipped.length,
+      skipped: skipped.map(s => ({
+        productName: s.item.productName,
+        draftPoNumber: s.draftPoNumber,
+      })),
+    };
   }
 
   // ─── Nightly wish list auto-populate (called by cron) ────────────────────────

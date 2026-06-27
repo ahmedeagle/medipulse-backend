@@ -27,6 +27,8 @@ import { CatalogRequestsService } from './catalog-requests.service';
 import {
   CreateCatalogRequestDto,
   UpdateCatalogRequestDto,
+  BulkCreateCatalogRequestDto,
+  BulkUpdateCatalogRequestDto,
 } from './dto/catalog-request.dto';
 import { CatalogRequestStatus } from './entities/catalog-request.entity';
 
@@ -53,6 +55,25 @@ export class CatalogRequestsController {
     @Body() dto: CreateCatalogRequestDto,
   ) {
     return this.service.createForPharmacy(user.tenantId, user.id, dto);
+  }
+
+  @Post('catalog/requests/bulk')
+  @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @ApiOperation({
+    summary: 'Submit many catalog requests in one call (migration / onboarding)',
+    description:
+      'Up to 500 items per call. Each item runs the same auto-approve rules ' +
+      'as the single-item endpoint (barcode hit → instantly approved, ' +
+      'duplicates → rejected with the existing tracking number). Returns ' +
+      'per-line submitted[] and failed[] arrays so the migration UI can ' +
+      'surface row-level results.',
+  })
+  @ApiCreatedResponse({ description: '{ submitted: [{ index, trackingNumber, status }], failed: [{ index, reason, code }] }' })
+  bulkCreate(
+    @CurrentUser() user: any,
+    @Body() dto: BulkCreateCatalogRequestDto,
+  ) {
+    return this.service.bulkCreateForPharmacy(user.tenantId, user.id, dto);
   }
 
   @Get('catalog/requests')
@@ -100,5 +121,23 @@ export class CatalogRequestsController {
     @Body() dto: UpdateCatalogRequestDto,
   ) {
     return this.service.updateAsAdmin(user.id, id, dto);
+  }
+
+  @Patch('admin/catalog/requests/bulk')
+  @Roles(Role.SYSTEM_ADMIN)
+  @ApiOperation({
+    summary: '[Admin] Apply one status decision to many requests at once',
+    description:
+      'Cuts admin work on migration batches: most rows from a single ' +
+      'pharmacy onboarding need the same decision. Returns succeeded[] ' +
+      'and failed[] arrays so the admin UI can highlight rows that need ' +
+      'manual attention (invalid transition, missing rejectionReason, etc.).',
+  })
+  @ApiOkResponse({ description: '{ succeeded: id[], failed: [{ id, reason }] }' })
+  bulkUpdateAsAdmin(
+    @CurrentUser() user: any,
+    @Body() dto: BulkUpdateCatalogRequestDto,
+  ) {
+    return this.service.bulkUpdateAsAdmin(user.id, dto);
   }
 }

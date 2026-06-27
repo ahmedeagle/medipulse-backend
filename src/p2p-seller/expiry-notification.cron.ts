@@ -153,12 +153,13 @@ export class ExpiryNotificationCron {
         if (expiryTime > alertCutoff) continue; // beyond this tenant's configured alert window
 
         const daysLeft = Math.floor((expiryTime - Date.now()) / 86_400_000);
-        const aiCenterRef = `/pharmacy/ai-center?tab=tasks&task=expiry_clearance`;
+        const productId = (item as any).product?.id ?? 'unknown';
+        // Per-item ref — dedup must be per-product, not per-tenant (the old single AI-Center ref
+        // caused all items after the first to be silently skipped for the whole tenant).
+        const itemRef = `/pharmacy/inventory?productId=${productId}&nearExpiry=1`;
 
-        // Dedup: skip if we already sent a near_expiry alert for this item within 72 hours
-        const existing = await this.notificationService.findByResourceRef(
-          aiCenterRef, tenantId,
-        );
+        // Dedup: skip if we already sent a near_expiry alert for this specific product within 72 hours
+        const existing = await this.notificationService.findByResourceRef(itemRef, tenantId);
         if (existing && (Date.now() - existing.createdAt.getTime()) < 72 * 3_600_000) continue;
 
         const productNameAr = (item as any).product?.nameAr ?? (item as any).product?.name ?? 'Unknown product';
@@ -167,8 +168,8 @@ export class ExpiryNotificationCron {
           tenantId,
           type: 'near_expiry',
           title: `${productNameAr} — ${daysLeft} يوم للانتهاء`,
-          body: `الكمية: ${item.quantity} وحدة — مركز الذكاء أنشأ مهمة تصفية تلقائية، راجعها وأقرّها`,
-          resourceRef: aiCenterRef,
+          body: `الكمية: ${item.quantity} وحدة تنتهي خلال ${daysLeft} يوم — تحقق من المخزون`,
+          resourceRef: itemRef,
         });
       }
     }

@@ -156,9 +156,9 @@ export class P2pSellerController {
   }
 
   @Post('p2p/seller/expiry-notifications/trigger')
-  @Roles(Role.PHARMACY_ADMIN)
+  @Roles(Role.SYSTEM_ADMIN)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Manually trigger expiry notification digest (for testing)' })
+  @ApiOperation({ summary: 'Manually trigger expiry notification digest (system admin only — runs for all tenants)' })
   async triggerExpiryNotifications() {
     await this.expiryNotificationCron.sendDailyExpiryDigests();
     await this.expiryNotificationCron.sendCriticalItemAlerts();

@@ -7,6 +7,7 @@ import { SupplierReliabilityService } from './supplier-reliability.service';
 import { SupplierProfileService } from './supplier-profile.service';
 import { PreferredSupplierService } from './preferred-supplier.service';
 import { CatalogImportService } from './catalog-import.service';
+import { MarketAvailabilityService } from './market-availability.service';
 import {
   SupplierProfileController,
   SupplierProfileAdminController,
@@ -18,6 +19,7 @@ import { SupplierCatalogItem } from './entities/supplier-catalog-item.entity';
 import { SupplierReliabilityScore } from './entities/supplier-reliability-score.entity';
 import { SupplierProfile } from './entities/supplier-profile.entity';
 import { PreferredSupplier } from './entities/preferred-supplier.entity';
+import { MarketAvailabilitySnapshot } from './entities/market-availability-snapshot.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { NormalizationModule } from '../normalization/normalization.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
@@ -29,6 +31,7 @@ import { AnalyticsModule } from '../analytics/analytics.module';
       SupplierReliabilityScore,
       SupplierProfile,
       PreferredSupplier,
+      MarketAvailabilitySnapshot,
       Tenant,
     ]),
     MulterModule.register({ limits: { fileSize: 5 * 1024 * 1024 } }), // 5MB CSV max
@@ -49,12 +52,14 @@ import { AnalyticsModule } from '../analytics/analytics.module';
     SupplierProfileService,
     PreferredSupplierService,
     CatalogImportService,
+    MarketAvailabilityService,
   ],
   exports: [
     SupplierService,
     SupplierReliabilityService,
     SupplierProfileService,
     PreferredSupplierService,
+    MarketAvailabilityService,
   ],
 })
 export class SupplierModule {}

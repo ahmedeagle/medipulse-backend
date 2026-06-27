@@ -8,6 +8,9 @@ import {
   IsIn,
   Min,
   IsObject,
+  IsEmail,
+  MaxLength,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -62,6 +65,22 @@ export class UpsertSellerProfileDto {
   @IsOptional()
   @IsString()
   address?: string;
+
+  // ── Contact channels (see migration AddContactChannelsToProfiles) ─────────
+  @IsOptional()
+  @IsString()
+  @Matches(/^[\d\s\-+()]{4,32}$/, { message: 'phone must be a valid phone number' })
+  phone?: string;
+
+  @IsOptional()
+  @IsEmail({}, { message: 'email must be a valid email address' })
+  @MaxLength(255)
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[\d\s\-+()]{4,32}$/, { message: 'whatsapp must be a valid phone number' })
+  whatsapp?: string;
 
   @IsOptional()
   @IsBoolean()

@@ -66,7 +66,7 @@ export class PosController {
       cashierId,
       dateFrom,
       dateTo,
-      limit: +limit,
+      limit: Math.min(+limit || 20, 1000),
       offset: +offset,
     });
   }
@@ -94,7 +94,7 @@ export class PosController {
     @Query('limit')      limit  = 50,
     @Query('offset')     offset = 0,
   ) {
-    return this.pos.listTransactions(tenantId(req), { shiftId, customerId, type, dateFrom, dateTo, limit: +limit, offset: +offset });
+    return this.pos.listTransactions(tenantId(req), { shiftId, customerId, type, dateFrom, dateTo, limit: Math.min(+limit || 50, 1000), offset: +offset });
   }
 
   @Get('transactions/:id')
@@ -134,7 +134,7 @@ export class PosController {
     @Query('limit')  limit  = 30,
     @Query('offset') offset = 0,
   ) {
-    return this.pos.listCustomers(tenantId(req), q, +limit, +offset);
+    return this.pos.listCustomers(tenantId(req), q, Math.min(+limit || 30, 1000), +offset);
   }
 
   @Get('customers/:id')
@@ -160,7 +160,7 @@ export class PosController {
     @Query('limit')  limit  = 20,
     @Query('offset') offset = 0,
   ) {
-    return this.pos.getCustomerTransactions(tenantId(req), id, +limit, +offset);
+    return this.pos.getCustomerTransactions(tenantId(req), id, Math.min(+limit || 20, 1000), +offset);
   }
 
   // ── Missed demand ─────────────────────────────────────────────────────────
@@ -213,7 +213,7 @@ export class PosController {
     @Query('limit')  limit  = 50,
     @Query('offset') offset = 0,
   ) {
-    return this.pos.listInsuranceCompanies(tenantId(req), q, +limit, +offset);
+    return this.pos.listInsuranceCompanies(tenantId(req), q, Math.min(+limit || 50, 1000), +offset);
   }
 
   @Patch('insurance-companies/:id')

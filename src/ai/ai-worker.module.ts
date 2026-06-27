@@ -8,6 +8,7 @@ import { AiRecommendation } from './entities/ai-recommendation.entity';
 import { AiAuditLog } from './entities/ai-audit-log.entity';
 import { InventoryService } from '../inventory/inventory.service';
 import { ConsumptionAnalyticsService } from '../inventory/consumption-analytics.service';
+import { CatalogMatchingService } from '../inventory/catalog-matching.service';
 import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Product } from '../inventory/entities/product.entity';
 import { ConsumptionSnapshot } from '../inventory/entities/consumption-snapshot.entity';
@@ -49,6 +50,6 @@ import { AI_RECOMMENDATIONS_QUEUE } from './ai.constants';
     PharmacySettingsModule,
   ],
   // Provide inventory services directly — avoids importing InventoryModule which carries HTTP controllers
-  providers: [AiService, AiRateLimiter, AiTokenBudget, DynamicAgentRunner, AiGenerationProcessor, InventoryService, ConsumptionAnalyticsService],
+  providers: [AiService, AiRateLimiter, AiTokenBudget, DynamicAgentRunner, AiGenerationProcessor, InventoryService, ConsumptionAnalyticsService, CatalogMatchingService],
 })
 export class AiWorkerModule {}

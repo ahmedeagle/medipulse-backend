@@ -56,6 +56,8 @@ export class SellerReliabilityService {
         avgResponseMinutes: 0,
         fulfillmentRate: 0,
         sampleSize: 0,
+        avgRating: null,
+        reviewSample: 0,
       });
     }
 
@@ -73,11 +75,31 @@ export class SellerReliabilityService {
       ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length
       : 1440;
 
+    // Buyer ratings — included only when sample is meaningful (≥3 reviews).
+    // Avoids the "one angry buyer tanks a new seller" failure mode common
+    // in early-stage GCC/Egypt marketplaces.
+    const ratingRows: Array<{ avg_rating: string | null; sample: string }> =
+      await this.dataSource.query(
+        `SELECT AVG(rating)::numeric(5,2) AS avg_rating,
+                COUNT(*)::int            AS sample
+           FROM p2p_reviews
+          WHERE "sellerTenantId" = $1
+            AND "createdAt" >= NOW() - INTERVAL '180 days'`,
+        [sellerTenantId],
+      );
+    const reviewSample = Number(ratingRows[0]?.sample ?? 0);
+    const avgRating =
+      reviewSample >= 3 && ratingRows[0]?.avg_rating !== null
+        ? Number(ratingRows[0].avg_rating)
+        : null;
+
     return this.upsertScore(sellerTenantId, {
       acceptanceRate: accepted / total,
       avgResponseMinutes,
       fulfillmentRate: completed / total,
       sampleSize: total,
+      avgRating,
+      reviewSample,
     });
   }
 
@@ -103,17 +125,32 @@ export class SellerReliabilityService {
       avgResponseMinutes: number;
       fulfillmentRate: number;
       sampleSize: number;
+      avgRating?: number | null;
+      reviewSample?: number;
     },
   ): Promise<SellerReliabilityScore> {
     const responseSpeed = Math.max(0, 1 - data.avgResponseMinutes / 1440);
-    const overallScore = Math.round(
-      data.acceptanceRate * 50 + responseSpeed * 30 + data.fulfillmentRate * 20,
-    );
+    const opsScore =
+      data.acceptanceRate * 50 + responseSpeed * 30 + data.fulfillmentRate * 20;
+
+    // Blend buyer ratings (1–5 → 0–100 scale) into the score when we have
+    // a meaningful sample. Weight grows with sample size, capped at 30%.
+    let overallScore = opsScore;
+    if (data.avgRating !== null && data.avgRating !== undefined && data.reviewSample && data.reviewSample >= 3) {
+      const reviewScore = ((data.avgRating - 1) / 4) * 100; // 1→0, 5→100
+      const weight = Math.min(0.3, data.reviewSample / 100); // 3 → 0.03, 100 → 0.3
+      overallScore = opsScore * (1 - weight) + reviewScore * weight;
+    }
+    overallScore = Math.round(overallScore);
+
     const label = overallScore >= 70 ? 'high' : overallScore >= 40 ? 'medium' : 'low';
     const trustLevel = this.deriveTrustLevel(overallScore, data.sampleSize);
 
     const payload = {
-      ...data,
+      acceptanceRate: data.acceptanceRate,
+      avgResponseMinutes: data.avgResponseMinutes,
+      fulfillmentRate: data.fulfillmentRate,
+      sampleSize: data.sampleSize,
       overallScore,
       label,
       trustLevel,

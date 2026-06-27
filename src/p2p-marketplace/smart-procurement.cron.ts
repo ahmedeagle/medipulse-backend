@@ -112,6 +112,8 @@ export class SmartProcurementCron {
           agentCode:   'smart_procurement',
           subjectType: 'smart_procurement',
           subjectId:   opp.p2pListingId,
+          // Same restock need as low_stock / inventory_expert — collapse.
+          needKey:     `restock::${opp.productId}`,
           title:       `فرصة شراء ذكية: ${productLabel}`,
           summary:     `${savingsText}${distanceText} — متاح ${opp.availableQty} وحدة`,
           rationale:   `مخزونك ${opp.currentQty} وحدة (أقل من الحد الأدنى ${opp.minThreshold}). أفضل عرض متاح من ${opp.sellerName ?? 'صيدلية محلية'} بسعر ${opp.p2pPrice} ج.م/وحدة`,

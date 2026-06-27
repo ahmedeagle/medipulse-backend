@@ -3,11 +3,13 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  ConflictException,
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, LessThan, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ProcurementDraft, DraftStatus, UrgencyLevel } from './entities/procurement-draft.entity';
 import { AiRecommendation } from '../ai/entities/ai-recommendation.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
@@ -18,6 +20,8 @@ import { OrderItem } from '../orders/entities/order-item.entity';
 import { OrderStatus } from '../common/enums/order-status.enum';
 import { RecommendationType } from '../common/enums/recommendation-type.enum';
 import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
+import { ProcurementOrderBuilder } from './procurement-order.builder';
+import { EVENTS } from '../events/domain-events';
 
 @Injectable()
 export class ProcurementDraftService {
@@ -40,6 +44,8 @@ export class ProcurementDraftService {
     private readonly orderItemRepo: Repository<OrderItem>,
     private readonly dataSource: DataSource,
     private readonly pharmacySettingsService: PharmacySettingsService,
+    private readonly orderBuilder: ProcurementOrderBuilder,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ─── Auto-generate draft from a HIGH-risk recommendation ─────────────────
@@ -163,68 +169,80 @@ export class ProcurementDraftService {
   // ─── Approve ──────────────────────────────────────────────────────────────
 
   async approveDraft(pharmacyTenantId: string, draftId: string): Promise<Order> {
-    const draft = await this.findOwned(pharmacyTenantId, draftId);
-
-    if (draft.status !== 'pending_review') {
-      throw new BadRequestException(`Draft is already ${draft.status}`);
-    }
-    if (draft.expiresAt < new Date()) {
-      throw new BadRequestException('Draft has expired — generate a new recommendation');
-    }
-
-    // Verify supplier still has product available with sufficient stock
-    const listing = await this.catalogRepo.findOne({
-      where: {
-        supplierTenantId: draft.supplierTenantId,
-        productId: draft.productId,
-        isAvailable: true,
-      },
+    // Tenant-scope check happens BEFORE we open a transaction so we never
+    // hold a row lock for a forbidden request. The status/expiry check is
+    // intentionally deferred to inside the transaction (with FOR UPDATE)
+    // so two concurrent approvers cannot both pass it and both create an
+    // Order — the second caller will see status='converted_to_order' and
+    // abort with ConflictException instead of a duplicate.
+    const owned = await this.draftRepo.findOne({
+      where: { id: draftId },
+      select: ['id', 'pharmacyTenantId'],
     });
-    if (!listing) {
-      throw new BadRequestException('Supplier product is no longer available — reject this draft');
+    if (!owned) throw new NotFoundException(`Draft ${draftId} not found`);
+    if (owned.pharmacyTenantId !== pharmacyTenantId) {
+      throw new ForbiddenException('Access denied');
     }
-
-    // Explicit stock check — isAvailable=true does not guarantee sufficient stock
-    if (listing.stock > 0 && Number(listing.stock) < draft.suggestedQuantity) {
-      throw new BadRequestException(
-        `Insufficient supplier stock. Available: ${listing.stock} units, draft requests: ${draft.suggestedQuantity} units. ` +
-        `Reject this draft and generate a new recommendation.`,
-      );
-    }
-
-    const unitPrice      = Number(listing.price);
-    const subtotalAmount = unitPrice * draft.suggestedQuantity;
-    const vatRate        = 0.15;
-    const vatAmount      = Math.round(subtotalAmount * vatRate * 100) / 100;
-    const totalAmount    = Math.round((subtotalAmount + vatAmount) * 100) / 100;
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.startTransaction();
 
     try {
-      const order = qr.manager.create(Order, {
-        pharmacyTenantId,
-        supplierTenantId:  draft.supplierTenantId,
-        currency:          'SAR',
-        subtotalAmount,
-        vatRate,
-        vatAmount,
-        totalAmount,
-        status:            OrderStatus.SUBMITTED,
-        notes:             `Auto-generated from procurement draft ${draft.id}`,
+      // Atomic claim: lock the draft row and re-read its current state.
+      // Any other transaction trying to convert the same draft (cart
+      // checkout, second approval click, basket executor) will block here
+      // and find status != 'pending_review' once we commit.
+      const draft = await qr.manager.findOne(ProcurementDraft, {
+        where: { id: draftId },
+        lock: { mode: 'pessimistic_write' },
       });
-      const savedOrder = await qr.manager.save(Order, order);
+      if (!draft) throw new NotFoundException(`Draft ${draftId} not found`);
+      if (draft.status !== 'pending_review') {
+        throw new ConflictException(
+          `هذا الطلب جاري معالجته بالفعل أو تم تحويله إلى أمر شراء (status=${draft.status})`,
+        );
+      }
+      if (draft.expiresAt < new Date()) {
+        throw new BadRequestException('Draft has expired — generate a new recommendation');
+      }
 
-      await qr.manager.save(
-        OrderItem,
-        qr.manager.create(OrderItem, {
-          orderId: savedOrder.id,
+      // Verify supplier still has product available with sufficient stock.
+      // Done inside the txn so a concurrent listing-disable doesn't cause
+      // us to commit an order against a no-longer-available product.
+      const listing = await qr.manager.findOne(SupplierCatalogItem, {
+        where: {
+          supplierTenantId: draft.supplierTenantId,
           productId: draft.productId,
-          quantity: draft.suggestedQuantity,
+          isAvailable: true,
+        },
+      });
+      if (!listing) {
+        throw new BadRequestException('Supplier product is no longer available — reject this draft');
+      }
+      if (listing.stock > 0 && Number(listing.stock) < draft.suggestedQuantity) {
+        throw new BadRequestException(
+          `Insufficient supplier stock. Available: ${listing.stock} units, draft requests: ${draft.suggestedQuantity} units. ` +
+          `Reject this draft and generate a new recommendation.`,
+        );
+      }
+
+      const unitPrice = Number(listing.price);
+
+      // Currency + VAT come from the tenant's settings (jurisdiction-aware)
+      // instead of being hardcoded to SAR/15%.
+      const billing = await this.pharmacySettingsService.getBillingContext(pharmacyTenantId);
+
+      const savedOrder = await this.orderBuilder.buildOrderFromDraft(
+        qr.manager,
+        draft,
+        pharmacyTenantId,
+        {
           unitPrice,
-          totalPrice: totalAmount,
-        }),
+          currency: billing.currency,
+          vatRate:  billing.vatRate,
+          notes:    `Auto-generated from procurement draft ${draft.id}`,
+        },
       );
 
       await qr.manager.update(ProcurementDraft, draftId, {
@@ -233,6 +251,15 @@ export class ProcurementDraftService {
       });
 
       await qr.commitTransaction();
+
+      // Announce the order to the supplier (notification + email), mirroring
+      // the manual POST /orders path. Emitted after commit so a listener can
+      // never roll back a committed order.
+      this.eventEmitter.emit(EVENTS.ORDER_SUBMITTED, {
+        orderId: savedOrder.id,
+        pharmacyTenantId,
+        supplierTenantId: draft.supplierTenantId,
+      });
 
       this.logger.log(`Draft ${draftId} approved → order ${savedOrder.id}`);
       return this.orderRepo.findOne({

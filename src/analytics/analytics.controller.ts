@@ -18,6 +18,7 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { AnalyticsReadService } from './analytics-read.service';
+import { ProcurementReportsService } from './procurement-reports.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -30,7 +31,10 @@ import { AuditRead } from '../audit/decorators/audit-read.decorator';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('analytics')
 export class AnalyticsController {
-  constructor(private readonly svc: AnalyticsReadService) {}
+  constructor(
+    private readonly svc: AnalyticsReadService,
+    private readonly procurement: ProcurementReportsService,
+  ) {}
 
   @Get('dashboard')
   @Roles(Role.PHARMACY_ADMIN)
@@ -247,5 +251,94 @@ export class AnalyticsController {
       throw new ForbiddenException('You can only view pricing trends for your own supplier account');
     }
     return this.svc.getPriceTrend(supplierTenantId, productId, Math.min(days, 365));
+  }
+
+  /**
+   * Price Intelligence — cross-supplier price analysis for a product.
+   * Used by PriceIntelligencePage.tsx and the AI Center.
+   */
+  @Get('price-history')
+  @Roles(Role.PHARMACY_ADMIN, Role.SYSTEM_ADMIN)
+  @AuditRead('price_intelligence')
+  @ApiOperation({
+    summary: 'Price intelligence — multi-supplier price history for a product',
+    description:
+      'Returns per-supplier time series, summary stats (best/avg price), and overpayment detection. ' +
+      'If the pharmacy last paid > avg + 15%, overpaymentWarning = true.',
+  })
+  @ApiQuery({ name: 'productId', required: true })
+  @ApiQuery({ name: 'days', required: false, schema: { default: 90 } })
+  @ApiQuery({ name: 'from', required: false, description: 'ISO date (YYYY-MM-DD). Overrides `days` when supplied with `to`.' })
+  @ApiQuery({ name: 'to',   required: false, description: 'ISO date (YYYY-MM-DD). Inclusive end of window.' })
+  @ApiOkResponse({ description: 'PriceIntelligenceResult' })
+  getPriceHistory(
+    @CurrentUser() user: any,
+    @Query('productId', ParseUUIDPipe) productId: string,
+    @Query('days', new DefaultValuePipe(90), ParseIntPipe) days: number,
+    @Query('from') from?: string,
+    @Query('to')   to?: string,
+  ) {
+    return this.svc.getPriceIntelligence(user.tenantId, productId, Math.min(days, 365), { from, to });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Procurement & supplier & P2P reports (cross-channel buying analytics)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  @Get('procurement/summary')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('procurement_spend_report')
+  @ApiOperation({ summary: 'Cross-channel procurement spend: invoices + supplier POs + P2P, with trend & top suppliers' })
+  @ApiQuery({ name: 'dateFrom', required: true })
+  @ApiQuery({ name: 'dateTo',   required: true })
+  @ApiQuery({ name: 'channel',  required: false, enum: ['all','invoices','orders','p2p'] })
+  @ApiQuery({ name: 'supplierId', required: false })
+  getProcurementSummary(
+    @CurrentUser() user: any,
+    @Query('dateFrom') dateFrom: string,
+    @Query('dateTo')   dateTo:   string,
+    @Query('channel')  channel?: 'all'|'invoices'|'orders'|'p2p',
+    @Query('supplierId') supplierId?: string,
+  ) {
+    return this.procurement.getProcurementSummary(user.tenantId, {
+      dateFrom, dateTo, channel: channel ?? 'all', supplierId,
+    });
+  }
+
+  @Get('suppliers/performance')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('supplier_performance_report')
+  @ApiOperation({ summary: 'Supplier scorecard: fill-rate, rejections, lead time, paid %, total spend' })
+  @ApiQuery({ name: 'dateFrom', required: true })
+  @ApiQuery({ name: 'dateTo',   required: true })
+  @ApiQuery({ name: 'search',   required: false })
+  @ApiQuery({ name: 'page',     required: false, schema: { default: 1 } })
+  @ApiQuery({ name: 'pageSize', required: false, schema: { default: 50 } })
+  getSupplierPerformance(
+    @CurrentUser() user: any,
+    @Query('dateFrom') dateFrom: string,
+    @Query('dateTo')   dateTo:   string,
+    @Query('search')   search?:  string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page:     number = 1,
+    @Query('pageSize', new DefaultValuePipe(50), ParseIntPipe) pageSize: number = 50,
+  ) {
+    return this.procurement.getSupplierPerformance(user.tenantId, { dateFrom, dateTo, search, page, pageSize });
+  }
+
+  @Get('p2p/activity')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('p2p_activity_report')
+  @ApiOperation({ summary: 'P2P activity: buy + sell flows, net position, daily trend, top peers, listing snapshot' })
+  @ApiQuery({ name: 'dateFrom', required: true })
+  @ApiQuery({ name: 'dateTo',   required: true })
+  getP2pActivity(
+    @CurrentUser() user: any,
+    @Query('dateFrom') dateFrom: string,
+    @Query('dateTo')   dateTo:   string,
+  ) {
+    return this.procurement.getP2pActivity(user.tenantId, { dateFrom, dateTo });
   }
 }

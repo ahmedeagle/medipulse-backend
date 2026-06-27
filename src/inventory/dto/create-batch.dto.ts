@@ -57,5 +57,6 @@ export class CreateBatchDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   notes?: string;
 }

@@ -24,9 +24,9 @@ import {
   ApiConsumes,
   ApiBody,
 } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, Min, Max, IsIn } from 'class-validator';
+import { IsInt, IsOptional, IsString, Min, Max, IsIn, IsEmail, MaxLength, Matches } from 'class-validator';
 import { Type } from 'class-transformer';
-import { SupplierProfileService } from './supplier-profile.service';
+import { SupplierProfileService, SupplierMarketplaceCard } from './supplier-profile.service';
 import { PreferredSupplierService } from './preferred-supplier.service';
 import { CatalogImportService } from './catalog-import.service';
 import { AnalyticsReadService } from '../analytics/analytics-read.service';
@@ -45,7 +45,9 @@ class UpsertProfileDto {
   @IsOptional() @IsString()  licenseNumber?:      string;
   @IsOptional()              licenseExpiryDate?:  Date;
   @IsOptional() @IsString()  address?:            string;
-  @IsOptional() @IsString()  phone?:              string;
+  @IsOptional() @IsString() @Matches(/^[\d\s\-+()]{4,32}$/, { message: 'phone must be a valid phone number' })  phone?: string;
+  @IsOptional() @IsEmail({}, { message: 'email must be a valid email address' }) @MaxLength(255)  email?: string;
+  @IsOptional() @IsString() @Matches(/^[\d\s\-+()]{4,32}$/, { message: 'whatsapp must be a valid phone number' })  whatsapp?: string;
   @IsOptional() @IsString()  website?:            string;
   @IsOptional()              deliveryZones?:      string[];
   @IsOptional() @Type(() => Number) minOrderAmount?: number;
@@ -100,6 +102,20 @@ export class SupplierProfileController {
   @ApiOperation({ summary: 'Browse verified supplier profiles (paginated, pharmacy / chain admin)' })
   findAll(@Query() pagination: PaginationQueryDto) {
     return this.profileSvc.findAll('verified', pagination);
+  }
+
+  @Get('marketplace')
+  @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @AuditRead('supplier_marketplace')
+  @ApiOperation({
+    summary: 'Supplier marketplace — verified suppliers with reliability scores',
+    description:
+      'Returns verified supplier profiles joined with their overall reliability score, ' +
+      'sorted by reliability descending. Use this to power the supplier discovery page.',
+  })
+  @ApiOkResponse({ description: 'PaginatedResult<SupplierMarketplaceCard>' })
+  marketplace(@Query() pagination: PaginationQueryDto) {
+    return this.profileSvc.findAllWithReliability(pagination);
   }
 
   @Get(':supplierTenantId')

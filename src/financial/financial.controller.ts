@@ -1,8 +1,11 @@
-import { Controller, Get, Post, Patch, Param, Body, Query, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Query, Request, UseGuards } from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
 import { FinancialService } from './financial.service';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
 
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('v1/finance')
 export class FinancialController {
   constructor(private readonly svc: FinancialService) {}
@@ -22,7 +25,7 @@ export class FinancialController {
       from ? new Date(from) : new Date(Date.now() - 30 * 86400000),
       to   ? new Date(to)   : new Date(),
       parseInt(page, 10),
-      parseInt(limit, 10),
+      Math.min(parseInt(limit, 10) || 50, 1000),
     );
   }
 
@@ -64,5 +67,15 @@ export class FinancialController {
   @Roles(Role.SYSTEM_ADMIN)
   approveSettlement(@Param('id') id: string, @Request() req: any) {
     return this.svc.approveSettlement(id, req.user.sub);
+  }
+
+  /**
+   * Financial health snapshot — used by AI Center DashboardTab and Procurement Orchestrator.
+   * Returns: dead stock %, near-expiry value, pending payables, credit utilization, alerts.
+   */
+  @Get('health-snapshot')
+  @Roles(Role.PHARMACY_ADMIN, Role.SYSTEM_ADMIN)
+  getHealthSnapshot(@Request() req: any) {
+    return this.svc.getHealthSnapshot(req.user.tenantId);
   }
 }

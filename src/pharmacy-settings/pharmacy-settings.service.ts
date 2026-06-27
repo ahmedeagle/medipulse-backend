@@ -5,6 +5,33 @@ import { PharmacySettings, NotificationSettings } from './entities/pharmacy-sett
 import { Warehouse } from './entities/warehouse.entity';
 import { UpsertPharmacySettingsDto, CreateWarehouseDto, UpdateWarehouseDto } from './dto/upsert-settings.dto';
 
+/** Resolved tax + currency context for a pharmacy, used by every order-creation path. */
+export interface BillingContext {
+  /** ISO currency code, upper-cased (e.g. EGP, SAR, AED). */
+  currency: string;
+  /** VAT rate as a fraction 0..1 (e.g. 0.14). 0 when tax is disabled or jurisdiction is VAT-free. */
+  vatRate: number;
+  /** Whether tax is enabled for this tenant. */
+  vatEnabled: boolean;
+}
+
+/** Statutory VAT rates by ISO country code (fractions). Source of truth for jurisdiction defaults. */
+const VAT_BY_COUNTRY: Record<string, number> = {
+  EG: 0.14, SA: 0.15, AE: 0.05, OM: 0.05, BH: 0.10, QA: 0, KW: 0, JO: 0.16,
+};
+/** Fallback when country is missing but currency hints at the jurisdiction. */
+const VAT_BY_CURRENCY: Record<string, number> = {
+  EGP: 0.14, SAR: 0.15, AED: 0.05, OMR: 0.05, BHD: 0.10, QAR: 0, KWD: 0, JOD: 0.16,
+};
+/** Launch market default when nothing else resolves. */
+const DEFAULT_VAT_RATE = 0.14;
+
+/** Accepts a fraction (0.14) or a percentage (14); returns a normalized fraction, or null if invalid. */
+function normalizeVatRate(rate?: number | null): number | null {
+  if (rate == null || !Number.isFinite(rate) || rate < 0) return null;
+  return rate > 1 ? rate / 100 : rate;
+}
+
 @Injectable()
 export class PharmacySettingsService {
   constructor(
@@ -44,8 +71,47 @@ export class PharmacySettingsService {
       notificationSettings: dto.notificationSettings
         ? { ...(existing.notificationSettings ?? {}), ...dto.notificationSettings }
         : existing.notificationSettings,
+      taxSettings: dto.taxSettings
+        ? { ...(existing.taxSettings ?? {}), ...dto.taxSettings }
+        : existing.taxSettings,
     });
     return this.settingsRepo.save(merged);
+  }
+
+  /**
+   * Resolves the currency + VAT a tenant's purchase orders must use.
+   *
+   * Precedence for VAT:
+   *   1. Explicit `taxSettings.vatRate` (accepts fraction or percent)
+   *   2. Jurisdiction default by `country` (ISO code)
+   *   3. Jurisdiction default by `currency`
+   *   4. Launch-market default (Egypt 14%)
+   * When `taxEnabled` is false, vatRate is forced to 0.
+   *
+   * This is the single source of truth — every order-creation path
+   * (manual POST /orders, smart-plan checkout, draft approval) must call
+   * this instead of hardcoding currency/VAT.
+   */
+  async getBillingContext(tenantId: string): Promise<BillingContext> {
+    const s = await this.getSettings(tenantId);
+    const currency = (s.currency || 'EGP').toUpperCase();
+    const vatEnabled = s.taxEnabled !== false;
+
+    let vatRate = 0;
+    if (vatEnabled) {
+      const explicit = normalizeVatRate(s.taxSettings?.vatRate);
+      if (explicit != null) {
+        vatRate = explicit;
+      } else {
+        const country = (s.country || '').toUpperCase();
+        vatRate =
+          VAT_BY_COUNTRY[country] ??
+          VAT_BY_CURRENCY[currency] ??
+          DEFAULT_VAT_RATE;
+      }
+    }
+
+    return { currency, vatRate, vatEnabled };
   }
 
   // ── Warehouses ───────────────────────────────────────────────────────────────

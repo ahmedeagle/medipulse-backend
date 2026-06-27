@@ -77,8 +77,9 @@ export class InventoryController {
     @CurrentUser() user: any,
     @Query() pagination: PaginationQueryDto,
     @Query('q') q?: string,
+    @Query('linkStatus') linkStatus?: string,
   ) {
-    return this.inventoryService.findAll(user.tenantId, pagination, q);
+    return this.inventoryService.findAll(user.tenantId, pagination, q, linkStatus);
   }
 
   @Get('inventory/low-stock')
@@ -101,6 +102,14 @@ export class InventoryController {
     @Query() pagination: PaginationQueryDto,
   ) {
     return this.inventoryService.findExpired(user.tenantId, pagination);
+  }
+
+  @Get('inventory/suggested-count')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Count inventory items awaiting catalog link review (linkStatus=suggested)' })
+  @ApiOkResponse({ description: '{ count: number }' })
+  getSuggestedCount(@CurrentUser() user: any) {
+    return this.inventoryService.countSuggested(user.tenantId).then(count => ({ count }));
   }
 
   @Post('inventory')

@@ -7,6 +7,10 @@ import {
   IsDateString,
   Min,
   IsArray,
+  MaxLength,
+  MinLength,
+  IsUrl,
+  ArrayMaxSize,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { PaginationQueryDto } from '../../common/pagination/pagination-query.dto';
@@ -53,11 +57,14 @@ export class AcceptP2pOrderDto {
 export class ShipP2pOrderDto {
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   note?: string;
 }
 
 export class RejectP2pOrderDto {
   @IsString()
+  @MinLength(3)
+  @MaxLength(500)
   reason: string;
 }
 
@@ -66,9 +73,14 @@ export class OpenDisputeDto {
   type: string;
 
   @IsString()
+  @MinLength(10)
+  @MaxLength(2048)
   description: string;
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(10)
+  @IsUrl({}, { each: true, message: 'each evidence URL must be a valid URL' })
+  @MaxLength(2048, { each: true })
   evidenceUrls?: string[];
 }

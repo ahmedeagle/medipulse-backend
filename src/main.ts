@@ -52,8 +52,17 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // ── Static files — uploaded seller documents ──────────────────────────────
-  app.useStaticAssets(path.join(process.cwd(), 'uploads'), { prefix: '/uploads' });
+  // ── Static files — uploaded seller documents + product images ──────────
+  // 7-day browser cache (product images change rarely; uploads are
+  // content-addressed). ETag stays on so a forced refresh still revalidates.
+  app.useStaticAssets(path.join(process.cwd(), 'uploads'), {
+    prefix: '/uploads',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    immutable: false,
+    setHeaders(res) {
+      res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    },
+  });
 
   // ── Body size limit ────────────────────────────────────────────────────────
   app.use(express.json({ limit: '1mb' }));

@@ -1,6 +1,6 @@
 import {
   IsArray, IsEnum, IsNotEmpty, IsNumber, IsOptional,
-  IsString, IsUUID, IsDateString, Min, Max, ValidateNested,
+  IsString, IsUUID, IsDateString, Min, Max, MaxLength, ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -61,7 +61,7 @@ export class CreateReturnDto {
   @IsOptional() @IsNumber() @Min(0)
   discountValue?: number;
 
-  @IsOptional() @IsString()
+  @IsOptional() @IsString() @MaxLength(2000)
   notes?: string;
 
   @IsArray() @ValidateNested({ each: true })

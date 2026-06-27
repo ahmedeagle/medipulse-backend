@@ -47,6 +47,8 @@ export class CreateApprovalDto {
   @ApiPropertyOptional() @IsOptional() @IsObject()     payload?: Record<string, any>;
   @ApiPropertyOptional() @IsOptional() @IsString()     expiresAt?: string;
   @ApiPropertyOptional() @IsOptional() @IsString()     confidenceReason?: string;
+  @ApiPropertyOptional({ description: 'Central-orchestration dedup key, e.g. restock::<productId>.' })
+  @IsOptional() @IsString() @MaxLength(120)            needKey?: string;
 }
 
 export class ListApprovalsQueryDto {

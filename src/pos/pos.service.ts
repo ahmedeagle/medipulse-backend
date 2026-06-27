@@ -218,6 +218,21 @@ export class PosService {
     const shift = await this.shiftRepo.findOne({ where: { pharmacyTenantId: tenantId, status: 'open' } });
     if (!shift) throw new BadRequestException('No open shift. Please open a shift before making sales.');
 
+    // Enforce product-level POS sale restrictions before touching inventory
+    if (dto.type === 'sale') {
+      const productIds = dto.items.map(i => i.productId).filter(Boolean);
+      if (productIds.length > 0) {
+        const blocked: Array<{ name: string; nameAr: string }> = await this.dataSource.query(
+          `SELECT name, "nameAr" FROM products WHERE id = ANY($1) AND "disablePOSSale" = true`,
+          [productIds],
+        );
+        if (blocked.length > 0) {
+          const names = blocked.map(p => p.nameAr || p.name).join('، ');
+          throw new BadRequestException(`المنتجات التالية ممنوعة من البيع على الكاشير: ${names}`);
+        }
+      }
+    }
+
     const subtotal   = dto.items.reduce((s, i) => s + i.unitPrice * i.quantity - (i.discountAmount ?? 0), 0);
     const discount   = dto.discountAmount ?? 0;
     const taxAmount  = 0; // extend later for VAT

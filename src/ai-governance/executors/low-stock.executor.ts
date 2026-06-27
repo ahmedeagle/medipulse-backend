@@ -74,16 +74,20 @@ export class LowStockExecutor {
             executedAt: new Date().toISOString(),
           };
         } else {
+          // No same-city P2P — route to AI Center Tasks tab, where the
+          // Purchase-Expert bridge will surface a procurement_draft approval
+          // for this product (same needKey `restock::<productId>` so the
+          // cards collapse). Avoids the legacy /pharmacy/procurement page.
           result = {
             action:    'reorder',
-            deepLink:  `/pharmacy/procurement`,
+            deepLink:  `/pharmacy/ai-center?tab=tasks`,
             executedAt: new Date().toISOString(),
           };
         }
       } else {
         result = {
           action:    'reorder',
-          deepLink:  `/pharmacy/procurement`,
+          deepLink:  `/pharmacy/ai-center?tab=tasks`,
           executedAt: new Date().toISOString(),
         };
       }
@@ -92,11 +96,11 @@ export class LowStockExecutor {
 
       const titleMap: Record<ExecutionResult['action'], string> = {
         p2p_available: `"${p.productName}" متاح للشراء من البورصة الدوائية`,
-        reorder:       `"${p.productName}" — أنشئ طلب شراء من المورد`,
+        reorder:       `"${p.productName}" — خطة الشراء جاهزة في مركز الذكاء`,
       };
       const bodyMap: Record<ExecutionResult['action'], string> = {
         p2p_available: `عُثر على عروض لـ ${p.productName} في نفس مدينتك. اضغط للاطلاع والشراء الآن.`,
-        reorder:       `${p.productName} غير متاح في البورصة حالياً — اذهب للمشتريات لإنشاء طلب.`,
+        reorder:       `${p.productName} غير متاح في البورصة محلياً — راجع خطة الشراء الذكية في "مركز الذكاء → المهام".`,
       };
 
       await this.notifications.create({

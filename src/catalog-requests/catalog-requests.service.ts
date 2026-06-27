@@ -18,6 +18,8 @@ import { Product } from '../inventory/entities/product.entity';
 import {
   CreateCatalogRequestDto,
   UpdateCatalogRequestDto,
+  BulkCreateCatalogRequestDto,
+  BulkUpdateCatalogRequestDto,
 } from './dto/catalog-request.dto';
 
 const VALID_TRANSITIONS: Record<CatalogRequestStatus, CatalogRequestStatus[]> = {
@@ -140,7 +142,12 @@ export class CatalogRequestsService {
         });
       }
 
-      return saved;
+      // Auto-approve when we can prove a confident match (barcode hit).
+      // This is the migration unblocker: pharmacies bulk-submit hundreds
+      // of unmatched rows; the ones whose barcode already exists in the
+      // catalog skip the admin queue entirely.
+      const autoApproved = await this.tryAutoApprove(manager, saved);
+      return autoApproved ?? saved;
     });
   }
 
@@ -261,5 +268,137 @@ export class CatalogRequestsService {
 
       return saved;
     });
+  }
+
+  // ── Bulk APIs (migration / onboarding) ───────────────────────────────────
+
+  /**
+   * Submit many requests in one call. Used during data migration when a
+   * pharmacy uploads hundreds of unmatched SKUs from their legacy ERP.
+   *
+   * Each line is processed independently — duplicates and validation
+   * errors do NOT abort the rest of the batch; they're returned in the
+   * `failed` array so the UI can surface row-level issues.
+   */
+  async bulkCreateForPharmacy(
+    tenantId: string,
+    userId: string,
+    dto: BulkCreateCatalogRequestDto,
+  ): Promise<{
+    submitted: Array<{ index: number; trackingNumber: string; status: CatalogRequestStatus }>;
+    failed:    Array<{ index: number; reason: string; code?: string }>;
+  }> {
+    const submitted: Array<{ index: number; trackingNumber: string; status: CatalogRequestStatus }> = [];
+    const failed: Array<{ index: number; reason: string; code?: string }> = [];
+
+    for (let i = 0; i < dto.items.length; i++) {
+      const item = dto.items[i];
+      try {
+        const merged: CreateCatalogRequestDto = {
+          ...item,
+          notes: dto.batchNote
+            ? `${dto.batchNote}${item.notes ? ` — ${item.notes}` : ''}`
+            : item.notes,
+        };
+        const saved = await this.createForPharmacy(tenantId, userId, merged);
+        submitted.push({
+          index: i,
+          trackingNumber: saved.trackingNumber,
+          status: saved.status,
+        });
+      } catch (err: any) {
+        failed.push({
+          index: i,
+          reason: err?.response?.message ?? err?.message ?? 'unknown error',
+          code: err?.response?.code,
+        });
+      }
+    }
+
+    return { submitted, failed };
+  }
+
+  /**
+   * Admin-side bulk decision. Calls `updateAsAdmin` per id and aggregates
+   * results. Failures (invalid transition, missing rejectionReason, etc.)
+   * are collected per id so the admin sees which rows still need attention.
+   */
+  async bulkUpdateAsAdmin(
+    adminUserId: string,
+    dto: BulkUpdateCatalogRequestDto,
+  ): Promise<{
+    succeeded: string[];
+    failed:    Array<{ id: string; reason: string }>;
+  }> {
+    const succeeded: string[] = [];
+    const failed: Array<{ id: string; reason: string }> = [];
+
+    for (const id of dto.ids) {
+      try {
+        await this.updateAsAdmin(adminUserId, id, {
+          status: dto.status,
+          adminNotes: dto.adminNotes,
+          rejectionReason: dto.rejectionReason,
+        });
+        succeeded.push(id);
+      } catch (err: any) {
+        failed.push({
+          id,
+          reason: err?.response?.message ?? err?.message ?? 'unknown error',
+        });
+      }
+    }
+
+    return { succeeded, failed };
+  }
+
+  /**
+   * Best-effort auto-approval. If the request includes a barcode and that
+   * barcode already exists on a Product, we link the inventory row and
+   * close the request immediately — no admin time needed. Returns null
+   * when no confident match was found.
+   *
+   * Kept conservative: barcode-only match. Name-similarity matching is
+   * already handled by the migration-assistant before a request is even
+   * filed, so by the time we get here a barcode is the only signal we
+   * trust enough to skip human review.
+   */
+  private async tryAutoApprove(
+    manager: import('typeorm').EntityManager,
+    request: CatalogRequest,
+  ): Promise<CatalogRequest | null> {
+    const barcode = request.payload?.barcode?.trim();
+    if (!barcode) return null;
+
+    const product = await manager.getRepository(Product).findOne({
+      where: { barcode },
+      select: ['id'] as any,
+    });
+    if (!product) return null;
+
+    request.status = 'approved';
+    request.adminDecision = 'approved';
+    request.resolvedCatalogProductId = product.id;
+    request.resolvedAt = new Date();
+    request.timeline = [
+      ...(request.timeline || []),
+      {
+        at: new Date().toISOString(),
+        actor: 'system',
+        event: 'approved',
+        note: `auto-approved: barcode ${barcode} matched existing product`,
+      },
+    ];
+
+    const saved = await manager.getRepository(CatalogRequest).save(request);
+    if (saved.inventoryItemId) {
+      await manager.getRepository(InventoryItem).update(saved.inventoryItemId, {
+        productId: product.id,
+        linkStatus: 'linked',
+        matchScore: 100,
+        lastLinkedAt: new Date(),
+      });
+    }
+    return saved;
   }
 }

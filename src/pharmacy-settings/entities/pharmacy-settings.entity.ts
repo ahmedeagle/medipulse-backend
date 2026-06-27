@@ -61,6 +61,13 @@ export interface AiAnalysisSettings {
   analyzeOnStockChange?: boolean;
   /** Demand forecast horizon in days. Default: 14 */
   forecastHorizonDays?: number;
+  /**
+   * Overpayment alert threshold — when `lastPricePaid > marketAvg × (1 + pct/100)`
+   * the Price Intelligence page warns and the procurement orchestrator emits
+   * an `OverpaymentRecommendation`. Default: 15 (industry-standard tolerance
+   * for GCC + Egypt B2B pharma).
+   */
+  overpaymentThresholdPct?: number;
 }
 
 export interface NotificationSettings {
@@ -72,6 +79,35 @@ export interface NotificationSettings {
   enableClearanceAlerts?:         boolean;
   enablePosIntegrityAlerts?:      boolean;
   enableMorningBriefing?:         boolean;
+  enableOverpaymentAlerts?:       boolean;
+}
+
+/**
+ * VAT/Tax behaviour — varies by jurisdiction.
+ *
+ *  - 'tax_on_net'   → invoice-level discount reduces the taxable base; tax is
+ *                     recomputed on (subtotal − totalDiscount). This matches
+ *                     Egyptian VAT Law no. 67/2016 (art. 11) and the GCC VAT
+ *                     Framework Agreement default. Strongly recommended for
+ *                     pharmacies operating in EG / KSA / UAE / Oman post-2018.
+ *
+ *  - 'tax_on_gross' → invoice-level discount is treated as a commercial
+ *                     rebate after VAT is owed; tax stays on the pre-discount
+ *                     base. Use only when your accountant has explicitly
+ *                     advised this (some legacy KSA contracts, trade-discount
+ *                     edge cases).
+ */
+export interface TaxSettings {
+  vatCalculationMode?: 'tax_on_net' | 'tax_on_gross';
+  /**
+   * VAT rate applied to purchase invoices. Accepts a fraction (0.14) or a
+   * percentage (14) — the billing-context resolver normalizes both. When
+   * unset, a jurisdiction default is derived from country/currency
+   * (EG 14%, KSA 15%, UAE/Oman 5%, Bahrain 10%, Kuwait/Qatar 0%).
+   */
+  vatRate?: number;
+  /** Tax-registration number printed on invoices/receipts. */
+  taxRegistrationNumber?: string;
 }
 
 @Entity('pharmacy_settings')
@@ -157,6 +193,10 @@ export class PharmacySettings {
   // ── Notification preferences ─────────────────────────────────────────────
   @Column({ type: 'jsonb', nullable: true, default: '{}' })
   notificationSettings: NotificationSettings;
+
+  // ── Tax / VAT preferences (multi-jurisdiction) ───────────────────────────
+  @Column({ type: 'jsonb', default: '{}' })
+  taxSettings: TaxSettings;
 
   // ── P2P Network ──────────────────────────────────────────────────────────────
   /** When true, other pharmacies can discover this pharmacy's live inventory via "Need Now" search (availability only — no prices exposed). */

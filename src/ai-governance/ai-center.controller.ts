@@ -291,16 +291,28 @@ export class AiCenterController {
   ) {
     return this.aiStats.recent(
       user.tenantId,
-      Number(limit) || 25,
-      Number(offset) || 0,
+      Math.min(Number(limit) || 25, 500),
+      Math.max(Number(offset) || 0, 0),
     );
   }
 
   @Get('agents/token-usage/today')
   @Roles(Role.PHARMACY_ADMIN)
-  @ApiOperation({ summary: 'Per-tenant AI token usage for today vs daily cap' })
+  @ApiOperation({ summary: 'Per-tenant AI token usage for today vs daily cap (procurement bucket)' })
   tokenUsageToday(@CurrentUser() user: any) {
     return this.tokenBudget.usageToday(user.tenantId);
+  }
+
+  /**
+   * Per-feature breakdown — lets the admin see which AI surface (procurement,
+   * chat, migration, whatsapp) is consuming the budget today. Backs the
+   * "AI Cost" widget in the AI Center.
+   */
+  @Get('agents/token-usage/today/breakdown')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Per-feature AI token usage for today (cost attribution)' })
+  tokenUsageBreakdownToday(@CurrentUser() user: any) {
+    return this.tokenBudget.usageBreakdownToday(user.tenantId);
   }
 
   // ── Maintenance: on-demand bridge sync ─────────────────────────────────

@@ -32,11 +32,15 @@ import { CatalogRequestsModule } from './catalog-requests/catalog-requests.modul
 import { P2pSellerModule } from './p2p-seller/p2p-seller.module';
 import { P2pListingModule } from './p2p-listing/p2p-listing.module';
 import { P2pOrdersModule } from './p2p-orders/p2p-orders.module';
+import { P2pReviewsModule } from './p2p-reviews/p2p-reviews.module';
 import { P2pMarketplaceModule } from './p2p-marketplace/p2p-marketplace.module';
 import { PharmacySettingsModule } from './pharmacy-settings/pharmacy-settings.module';
 import { ChatModule }             from './chat/chat.module';
+import { WhatsappModule }         from './channels/whatsapp/whatsapp.module';
 import { PosModule }              from './pos/pos.module';
 import { FraudModule }            from './fraud/fraud.module';
+import { MigrationAssistantModule } from './migration-assistant/migration-assistant.module';
+import { OnboardingModule }       from './onboarding/onboarding.module';
 import { FeatureRequestsModule }  from './feature-requests/feature-requests.module';
 import { PurchasesModule }        from './purchases/purchases.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
@@ -135,6 +139,7 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     P2pSellerModule,
     P2pListingModule,
     P2pOrdersModule,
+    P2pReviewsModule,
     P2pMarketplaceModule,
     // ── Pharmacy Settings ─────────────────────────────────────────────────────
     PharmacySettingsModule,
@@ -142,7 +147,9 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     ChatModule,
     FraudModule,
     FeatureRequestsModule,
-    // ── Point of Sale ─────────────────────────────────────────────────────────
+    MigrationAssistantModule,    // ── Channels (WhatsApp — disabled unless WHATSAPP_ENABLED=true) ────────
+    OnboardingModule,
+    WhatsappModule,    // ── Point of Sale ─────────────────────────────────────────────────────────
     PosModule,
     // ── Purchase Management ───────────────────────────────────────────────────
     PurchasesModule,

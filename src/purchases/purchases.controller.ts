@@ -93,6 +93,7 @@ export class PurchasesController {
   }
 
   @Post('invoices')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   createInvoice(@CurrentUser() user: any, @Body() dto: CreateInvoiceDto) {
     return this.svc.createInvoice(user.pharmacyTenantId, dto, user.sub);
   }

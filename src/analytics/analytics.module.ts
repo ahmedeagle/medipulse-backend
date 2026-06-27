@@ -4,6 +4,7 @@ import { DomainEventStoreListener } from './domain-event-store.listener';
 import { PriceSnapshotListener } from './price-snapshot.listener';
 import { RecommendationOutcomeListener } from './recommendation-outcome.listener';
 import { AnalyticsReadService } from './analytics-read.service';
+import { ProcurementReportsService } from './procurement-reports.service';
 import { AnalyticsController } from './analytics.controller';
 import { DomainEventLog } from './entities/domain-event-log.entity';
 import { PriceSnapshot } from './entities/price-snapshot.entity';
@@ -33,7 +34,8 @@ import { Tenant } from '../auth/entities/tenant.entity';
     PriceSnapshotListener,
     RecommendationOutcomeListener,
     AnalyticsReadService,
+    ProcurementReportsService,
   ],
-  exports: [AnalyticsReadService],
+  exports: [AnalyticsReadService, ProcurementReportsService],
 })
 export class AnalyticsModule {}

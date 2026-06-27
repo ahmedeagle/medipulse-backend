@@ -13,6 +13,8 @@ import { PurchasesService }    from './purchases.service';
 import { PurchasesController } from './purchases.controller';
 import { WishListCron }        from './wish-list.cron';
 import { OcrService }          from './ocr.service';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -27,6 +29,8 @@ import { OcrService }          from './ocr.service';
       PurchaseInvoiceChangelog,
       Product,
     ]),
+    PharmacySettingsModule,
+    NotificationsModule,
   ],
   controllers: [PurchasesController],
   providers: [PurchasesService, WishListCron, OcrService],

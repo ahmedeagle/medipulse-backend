@@ -13,6 +13,7 @@ import { Product } from '../inventory/entities/product.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 import { AiService } from '../ai/ai.service';
+import { NotificationService } from '../notifications/notification.service';
 import {
   EVENTS,
   RecommendationGeneratedEvent,
@@ -48,6 +49,7 @@ export class AgentBridgeService {
     private readonly approvals: ApprovalService,
     private readonly aiService: AiService,
     private readonly dataSource: DataSource,
+    private readonly notifications: NotificationService,
   ) {}
 
   // ── 1) Inventory Expert: react to AI recommendations ────────────────────
@@ -120,6 +122,9 @@ export class AgentBridgeService {
       agentCode:        'inventory_expert',
       subjectType:      'recommendation',
       subjectId:        rec.id,
+      // Both branches (expiry / dead-stock) describe the same business
+      // need: liquidate this product. Collapse onto one card per product.
+      needKey:          `liquidate::${rec.productId}`,
       title,
       summary:          summaryParts.join(' · '),
       rationale:        isExpiry
@@ -164,6 +169,8 @@ export class AgentBridgeService {
       agentCode:       'inventory_expert',
       subjectType:     'recommendation',
       subjectId:       rec.id,
+      // Restock need — collapses with low_stock / smart_procurement / draft.
+      needKey:         `restock::${rec.productId}`,
       title:           `خطر نفاد المخزون: ${productName}`,
       summary:         summaryParts.join(' · '),
       rationale:       rec.explanation || 'تحليل اتجاه المبيعات لآخر 60 يوماً يشير إلى استنفاد قريب.',
@@ -207,6 +214,8 @@ export class AgentBridgeService {
       agentCode:        'inventory_expert',
       subjectType:      'recommendation',
       subjectId:        rec.id,
+      // Same restock need as low_stock / draft — collapses to one card.
+      needKey:          `restock::${rec.productId}`,
       title:            `شراء أسرع وأرخص: ${productName} متوفر في البورصة`,
       summary:          `${priceNote} — ${totalListings} عرض متاح. الكمية الناقصة: ${rec.payload?.deficit ?? '؟'} وحدة.`,
       rationale:        `مخزونك من ${productName} وصل للحد الأدنى. صيدلية أخرى تبيعه في البورصة الدوائية بسعر أفضل وبسرعة أكبر من الموردين التقليديين.${savingsPct > 0 ? ` ستوفر ${savingsPct}% مقارنةً بأرخص مورد متاح.` : ''}`,
@@ -219,16 +228,62 @@ export class AgentBridgeService {
   }
 
   // ── 2) Purchase Expert: scan procurement drafts ─────────────────────────
+  //
+  // Two important filters here:
+  //   • sourceType='manual'   → only auto-scheduler drafts flow through the
+  //                             approval queue. Cart-add drafts
+  //                             (sourceType='ai_plan') are managed by the
+  //                             cart UI + checkout flow and must NOT create
+  //                             duplicate approval cards on the Tasks tab.
+  //   • basketApprovalId IS NULL → drafts already folded into a supplier
+  //                             basket are skipped (idempotent scan).
+  //
+  // Drafts are then grouped per (tenant, supplier) so a single PO covers all
+  // products the pharmacist needs from that supplier today — fewer clicks,
+  // one shipment, one invoice.
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'purchase-expert-bridge' })
   async scanProcurementDrafts(): Promise<void> {
     // ORDER BY createdAt ASC ensures the oldest pending drafts get into the
     // queue first — so a flood of new drafts cannot starve out older ones.
-    const drafts = await this.draftRepo.find({
-      where: { status: 'pending_review' as any },
+    // NOTE: we intentionally do NOT filter by sourceType — both 'manual'
+    // (legacy seed) and 'ai_plan' (Cart + auto-draft scheduler) need to
+    // surface as Tasks. The (subjectId already-exists) check below de-dupes.
+    const newDrafts = await this.draftRepo.find({
+      where: {
+        status:           'pending_review' as any,
+        basketApprovalId: IsNull() as any,
+      },
       order: { createdAt: 'ASC' },
       take: 200,
     });
+
+    // ── Roll-up: also re-consider drafts that already have a single
+    // `procurement_draft` approval still awaiting the pharmacist's decision.
+    // If a brand-new draft arrives for the SAME supplier, we must merge them
+    // into one basket — otherwise the user sees two identical purchase tasks
+    // for the same supplier, which has been reported as confusing UX.
+    const openSingleApprovals = await this.approvalRepo.find({
+      where: {
+        subjectType: 'procurement_draft',
+        status:      In(['pending', 'modified']) as any,
+      },
+      select: ['id', 'subjectId', 'tenantId'],
+      take: 500,
+    });
+    const openSingleApprovalByDraftId = new Map(
+      openSingleApprovals.map(a => [a.subjectId, a]),
+    );
+    const supersedableDrafts = openSingleApprovals.length
+      ? await this.draftRepo.find({
+          where: {
+            id:     In(openSingleApprovals.map(a => a.subjectId)),
+            status: 'pending_review' as any,
+          },
+        })
+      : [];
+
+    const drafts = [...newDrafts, ...supersedableDrafts];
     if (drafts.length === 0) return;
 
     const productIds  = Array.from(new Set(drafts.map(d => d.productId)));
@@ -272,8 +327,18 @@ export class AgentBridgeService {
 
     let created = 0;
     let preflightExpired = 0;
+    let supersededApprovals = 0;
+
+    // Step 1 — pre-flight every draft against its supplier listing. Drafts
+    // that pass become candidates for basket grouping; failures are expired
+    // in-place so the cron never re-picks them.
+    // NOTE: supersedable drafts (already have a single approval) DO enter the
+    // candidate pool — they will be regrouped if a new draft joins their
+    // supplier, otherwise the existing single approval stays untouched.
+    const candidates: ProcurementDraft[] = [];
     for (const d of drafts) {
-      if (seen.has(d.id)) continue;
+      const isSupersedable = openSingleApprovalByDraftId.has(d.id);
+      if (seen.has(d.id) && !isSupersedable) continue;
 
       // Pre-flight #1: supplier no longer carries this product → expire the
       // draft so the cron stops re-picking it, and skip approval.
@@ -310,26 +375,107 @@ export class AgentBridgeService {
         continue;
       }
 
+      candidates.push(d);
+    }
+
+    // Step 2 — group by (pharmacyTenantId, supplierTenantId). Each group
+    // becomes ONE approval: either a single-line "procurement_draft" (back-
+    // compat, identical to old behaviour) or a multi-line
+    // "procurement_basket" when 2+ products share the same supplier.
+    const groups = new Map<string, ProcurementDraft[]>();
+    for (const d of candidates) {
+      const k = `${d.pharmacyTenantId}::${d.supplierTenantId}`;
+      const arr = groups.get(k);
+      if (arr) arr.push(d);
+      else groups.set(k, [d]);
+    }
+
+    for (const groupDrafts of groups.values()) {
       try {
-        await this.createDraftApproval(
-          d,
-          productById.get(d.productId),
-          supplierById.get(d.supplierTenantId),
-        );
-        created++;
+        // Collect any pre-existing single approvals attached to drafts in
+        // this group — they will be superseded if we end up creating a
+        // basket (multi-draft group).
+        const oldSingleApprovalIds = groupDrafts
+          .map(d => openSingleApprovalByDraftId.get(d.id)?.id)
+          .filter((id): id is string => !!id);
+
+        if (groupDrafts.length === 1) {
+          const d = groupDrafts[0];
+          // Idempotent: a lone draft that already has its single approval —
+          // nothing to do, keep showing the existing task.
+          if (oldSingleApprovalIds.length > 0) continue;
+
+          const approval = await this.createDraftApproval(
+            d,
+            productById.get(d.productId),
+            supplierById.get(d.supplierTenantId),
+          );
+          if (approval) {
+            await this.draftRepo.update(d.id, { basketApprovalId: approval.id });
+            await this.notifyProcurementApproval(approval, {
+              kind: 'single',
+              supplierName: supplierById.get(d.supplierTenantId)?.name || 'المورد',
+              productCount: 1,
+              productLabel: productById.get(d.productId)?.nameAr
+                            || productById.get(d.productId)?.name
+                            || 'منتج',
+              totalCost: Number(d.unitPrice) * d.suggestedQuantity,
+              currency: d.currency,
+              expiresAt: d.expiresAt,
+            });
+            created++;
+          }
+        } else {
+          const approval = await this.createSupplierBasketApproval(
+            groupDrafts,
+            productById,
+            supplierById.get(groupDrafts[0].supplierTenantId),
+          );
+          if (approval) {
+            await this.draftRepo.update(
+              { id: In(groupDrafts.map(d => d.id)) },
+              { basketApprovalId: approval.id },
+            );
+            // Roll-up: delete the now-redundant single approvals so the user
+            // sees ONE basket task per supplier instead of N identical singles.
+            if (oldSingleApprovalIds.length > 0) {
+              try {
+                await this.approvalRepo.delete({ id: In(oldSingleApprovalIds) });
+                supersededApprovals += oldSingleApprovalIds.length;
+              } catch (err) {
+                this.logger.warn(`supersede old single approval(s) failed: ${(err as Error).message}`);
+              }
+            }
+            await this.notifyProcurementApproval(approval, {
+              kind: 'basket',
+              supplierName: supplierById.get(groupDrafts[0].supplierTenantId)?.name || 'المورد',
+              productCount: groupDrafts.length,
+              productLabel: null,
+              totalCost: groupDrafts.reduce(
+                (s, d) => s + Number(d.unitPrice) * d.suggestedQuantity, 0,
+              ),
+              currency: groupDrafts[0].currency,
+              expiresAt: new Date(
+                groupDrafts.map(d => d.expiresAt.getTime()).reduce((a, b) => Math.min(a, b)),
+              ),
+            });
+            created++;
+          }
+        }
       } catch (err) {
-        this.logger.error(`draft approval failed (${d.id}): ${(err as Error).message}`);
+        this.logger.error(`basket/draft approval failed: ${(err as Error).message}`);
       }
     }
     if (created)         this.logger.log(`Purchase-Expert: created ${created} approval(s) from drafts`);
     if (preflightExpired) this.logger.warn(`Purchase-Expert: pre-flight expired ${preflightExpired} draft(s) — supplier listing missing or insufficient`);
+    if (supersededApprovals) this.logger.log(`Purchase-Expert: superseded ${supersededApprovals} single approval(s) — rolled up into baskets`);
   }
 
   private async createDraftApproval(
     d: ProcurementDraft,
     product: Product | undefined,
     supplier: Tenant | undefined,
-  ): Promise<void> {
+  ): Promise<Approval | null> {
     const productName  = product?.nameAr || product?.name || 'المنتج';
     const supplierName = supplier?.name  || 'المورد';
     const unitPrice    = Number(d.unitPrice);
@@ -340,10 +486,28 @@ export class AgentBridgeService {
       d.urgencyLevel === 'critical' ? 'critical' :
       d.urgencyLevel === 'high'     ? 'high'     : 'medium';
 
-    await this.approvals.create(d.pharmacyTenantId, {
+    // ── P4: surface Decision-Engine verdicts on the approval card ────────────
+    // When the draft was produced by ProcurementOrchestrator we copy the
+    // financial + delay + overpayment slices of planSnapshot into the approval
+    // payload so the UI can render badges (credit utilisation, "wait N days",
+    // "above market avg") without making a second API call.
+    const snap = (d.planSnapshot ?? null) as Record<string, any> | null;
+    const planVerdicts = snap && d.sourceType === 'ai_plan' ? {
+      financialStatus:           snap.financialStatus           ?? null,
+      delayRecommendation:       snap.delayRecommendation       ?? null,
+      overpaymentRecommendation: snap.overpaymentRecommendation ?? null,
+      riskScore:                 typeof snap.riskScore  === 'number' ? snap.riskScore  : null,
+      planConfidence:            typeof snap.confidence === 'number' ? snap.confidence : null,
+      signalFreshnessAt:         d.signalFreshnessAt ? d.signalFreshnessAt.toISOString() : null,
+    } : null;
+
+    return this.approvals.create(d.pharmacyTenantId, {
       agentCode:   'purchase_expert',
       subjectType: 'procurement_draft',
       subjectId:   d.id,
+      // Single-product draft — same restock need surfaces here too.
+      // Multi-product baskets stay unique (no needKey) on createSupplierBasketApproval.
+      needKey:     `restock::${d.productId}`,
       title:       `طلب شراء: ${productName} × ${d.suggestedQuantity}`,
       summary:     `من ${supplierName} بسعر ${unitPrice.toFixed(2)} ${d.currency} للوحدة · الإجمالي قبل الضريبة ${subtotal.toFixed(2)} ${d.currency} (≈ ${totalVat.toFixed(2)} مع الضريبة).`,
       rationale:   `اقتراح بناءً على توصية المخزون (مخاطر نفاد). تم اختيار المورد وفقاً لأعلى موثوقية وأفضل سعر متاح.`,
@@ -360,9 +524,121 @@ export class AgentBridgeService {
         currency:     d.currency,
         subtotal,
         urgencyLevel: d.urgencyLevel,
+        // P4 — null when the draft predates the Decision Engine
+        planVerdicts,
       },
       confidenceReason: `تم اختيار ${supplierName} وفقاً لأفضل سعر وأعلى موثوقية تسليم مسجلة، وبناءً على احتياج أوصى به خبير المخزون.`,
       expiresAt:      d.expiresAt.toISOString(),
+    });
+  }
+
+  /**
+   * Supplier-basket approval: a single composite "PO" representing multiple
+   * urgent products that should all be ordered from the same supplier today.
+   *
+   * Why one approval (not N): in practice the pharmacist wants to make ONE
+   * decision per supplier per day — bundle into a single shipment with one
+   * invoice. The payload carries each line item so the executor can build a
+   * real Order with multiple OrderItems atomically.
+   *
+   * Idempotency: every draft folded into this basket has its
+   * `basketApprovalId` set immediately after creation, so the 5-minute scan
+   * will not re-pick them.
+   */
+  private async createSupplierBasketApproval(
+    drafts:       ProcurementDraft[],
+    productById:  Map<string, Product>,
+    supplier:     Tenant | undefined,
+  ): Promise<Approval | null> {
+    const supplierName = supplier?.name || 'المورد';
+    const tenantId     = drafts[0].pharmacyTenantId;
+    const currency     = drafts[0].currency;
+
+    let subtotal = 0;
+    const items = drafts.map(d => {
+      const product     = productById.get(d.productId);
+      const productName = product?.nameAr || product?.name || 'المنتج';
+      const unitPrice   = Number(d.unitPrice);
+      const lineTotal   = unitPrice * d.suggestedQuantity;
+      subtotal += lineTotal;
+      return {
+        draftId:      d.id,
+        productId:    d.productId,
+        productName,
+        quantity:     d.suggestedQuantity,
+        unitPrice,
+        lineTotal,
+        urgencyLevel: d.urgencyLevel,
+      };
+    });
+
+    const totalVat = Math.round(subtotal * 1.15 * 100) / 100;
+
+    // Earliest expiry across the basket — once any line goes stale, the
+    // whole basket should be revisited.
+    const earliestExpiry = drafts
+      .map(d => d.expiresAt.getTime())
+      .reduce((a, b) => Math.min(a, b), Infinity);
+
+    // Priority = highest urgency in the basket. Critical bubbles up.
+    const priority: 'critical' | 'high' | 'medium' =
+      drafts.some(d => d.urgencyLevel === 'critical') ? 'critical' :
+      drafts.some(d => d.urgencyLevel === 'high')     ? 'high'     : 'medium';
+
+    // ── P4: aggregate Decision-Engine verdicts across the basket ────────────
+    // Financial status is tenant-level → all snapshots agree; pick first non-null.
+    // Delay rec is also tenant-level → pick the highest-confidence one.
+    // Overpayment is per product → surface the worst overpayment % so the
+    // pharmacist sees the most pressing alternative before approving.
+    const snaps = drafts
+      .map(d => (d.planSnapshot ?? null) as Record<string, any> | null)
+      .filter((s): s is Record<string, any> => !!s);
+    const confidenceRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+    const firstFinancial = snaps.find(s => s.financialStatus)?.financialStatus ?? null;
+    const bestDelay = snaps
+      .map(s => s.delayRecommendation)
+      .filter(Boolean)
+      .sort((a, b) => (confidenceRank[b?.confidence] ?? 0) - (confidenceRank[a?.confidence] ?? 0))[0] ?? null;
+    const worstOverpay = snaps
+      .map(s => s.overpaymentRecommendation)
+      .filter(Boolean)
+      .sort((a, b) => (b?.overpaymentPct ?? 0) - (a?.overpaymentPct ?? 0))[0] ?? null;
+    const worstRisk = snaps
+      .map(s => typeof s.riskScore === 'number' ? s.riskScore : 0)
+      .reduce((m, v) => Math.max(m, v), 0);
+    const planVerdicts = snaps.length > 0 ? {
+      financialStatus:           firstFinancial,
+      delayRecommendation:       bestDelay,
+      overpaymentRecommendation: worstOverpay,
+      riskScore:                 worstRisk || null,
+      planConfidence:            null,
+      signalFreshnessAt:         drafts[0].signalFreshnessAt
+                                   ? drafts[0].signalFreshnessAt.toISOString()
+                                   : null,
+    } : null;
+
+    return this.approvals.create(tenantId, {
+      agentCode:   'purchase_expert',
+      subjectType: 'procurement_basket',
+      subjectId:   drafts[0].id, // primary draft — kept for back-compat lookup
+      title:       `سلة شراء: ${items.length} منتجات من ${supplierName}`,
+      summary:     `${items.length} أصناف عاجلة من ${supplierName} · الإجمالي قبل الضريبة ${subtotal.toFixed(2)} ${currency} (≈ ${totalVat.toFixed(2)} مع الضريبة).`,
+      rationale:   `جمعنا ${items.length} منتجات يحتاج كلٌّ منها إلى إعادة طلب اليوم في طلب شراء واحد من نفس المورد — لتقليل تكلفة الشحن وتسريع التسليم.`,
+      confidence:  0.85,
+      priority,
+      payload: {
+        kind:         'supplier_basket',
+        supplierId:   drafts[0].supplierTenantId,
+        supplierName,
+        currency,
+        items,
+        draftIds:     drafts.map(d => d.id),
+        subtotal,
+        totalVat,
+        planVerdicts,
+      },
+      confidenceReason: `تم تجميع طلبات متعددة لنفس المورد بناءً على توصيات المخزون الحالية وأفضل سعر متاح لكل صنف.`,
+      expiresAt:        new Date(earliestExpiry).toISOString(),
     });
   }
 
@@ -414,6 +690,61 @@ export class AgentBridgeService {
       }
     }
     if (created) this.logger.log(`Catalog-Expert: created ${created} approval(s) from suggestions`);
+  }
+
+  /**
+   * Fire an in-app notification when the bridge creates a new procurement
+   * approval (single draft or supplier basket). Best-effort — a failure to
+   * deliver the notification never blocks approval creation. We always
+   * stamp `resourceRef = "approval:<id>"` so the bell-click can deep-link
+   * into the AI Center / Tasks tab on the matching card.
+   */
+  private async notifyProcurementApproval(
+    approval: Approval,
+    info: {
+      kind: 'single' | 'basket';
+      supplierName: string;
+      productCount: number;
+      productLabel: string | null;
+      totalCost: number;
+      currency: string;
+      expiresAt: Date;
+    },
+  ): Promise<void> {
+    try {
+      const totalFmt = info.totalCost.toLocaleString('ar-EG', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+      });
+      const deadlineFmt = info.expiresAt.toLocaleString('ar-EG', {
+        day:   'numeric',
+        month: 'short',
+        hour:  '2-digit',
+        minute:'2-digit',
+      });
+
+      const title =
+        info.kind === 'basket'
+          ? `خطة شراء جديدة: ${info.productCount} منتجات من ${info.supplierName}`
+          : `طلب شراء جديد: ${info.productLabel} من ${info.supplierName}`;
+
+      const body =
+        info.kind === 'basket'
+          ? `إجمالي ${totalFmt} ${info.currency} قبل الضريبة — راجعها قبل ${deadlineFmt}.`
+          : `بقيمة ${totalFmt} ${info.currency} قبل الضريبة — راجعها قبل ${deadlineFmt}.`;
+
+      await this.notifications.create({
+        tenantId:    approval.tenantId,
+        type:        'draft_created',
+        title,
+        body,
+        resourceRef: `approval:${approval.id}`,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `notifyProcurementApproval failed for ${approval.id}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async createCatalogApproval(item: InventoryItem, suggested: Product): Promise<void> {

@@ -12,6 +12,7 @@ import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { RedisModule } from '../common/redis/redis.module';
+import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { RedisModule } from '../common/redis/redis.module';
       InventoryItem, SupplierCatalogItem, Tenant,
     ]),
     RedisModule,
+    PharmacySettingsModule,
   ],
   controllers: [OrdersController],
   providers: [OrdersService, InvoiceService],

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, In } from 'typeorm';
 
 import { DemandForecastingService } from '../forecasting/demand-forecasting.service';
 import { ConsumptionAnalyticsService } from '../inventory/consumption-analytics.service';
@@ -13,6 +13,8 @@ import { CashFlowProjector } from '../financial/cash-flow-projector.service';
 import { AnalyticsReadService } from '../analytics/analytics-read.service';
 import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Product } from '../inventory/entities/product.entity';
+import { SupplierProfile } from '../supplier/entities/supplier-profile.entity';
+import { Tenant } from '../auth/entities/tenant.entity';
 import { ConflictResolutionEngine } from './conflict-resolution.engine';
 import {
   FinancialStatus,
@@ -61,6 +63,10 @@ export class ProcurementOrchestrator {
     private readonly inventoryRepo: Repository<InventoryItem>,
     @InjectRepository(Product)
     private readonly productRepo: Repository<Product>,
+    @InjectRepository(SupplierProfile)
+    private readonly supplierProfileRepo: Repository<SupplierProfile>,
+    @InjectRepository(Tenant)
+    private readonly tenantRepo: Repository<Tenant>,
   ) {}
 
   // ─── PUBLIC API ─────────────────────────────────────────────────────────────
@@ -189,7 +195,7 @@ export class ProcurementOrchestrator {
 
     // Batch 2: calls that depend on Batch 1
     const supplierIds = availableSuppliers.map((s) => s.supplierTenantId);
-    const [p2pResult, reliabilityMap] = await Promise.all([
+    const [p2pResult, reliabilityMap, pharmacyTenant, supplierProfiles] = await Promise.all([
       withTimeout(
         this.p2p.search(tenantId, { q: product?.name ?? '', limit: 10 }),
         SIGNAL_TIMEOUT_MS, 'P2pMarketplace', this.logger,
@@ -200,15 +206,61 @@ export class ProcurementOrchestrator {
             SIGNAL_TIMEOUT_MS, 'ReliabilityService', this.logger,
           )
         : Promise.resolve(new Map()),
+      // Pharmacy region — drives delivery-coverage filtering.
+      withTimeout(
+        this.tenantRepo.findOne({ select: ['id', 'region', 'city'], where: { id: tenantId } }),
+        SIGNAL_TIMEOUT_MS, 'TenantRegionLookup', this.logger,
+      ),
+      // Supplier delivery profiles — zones, lead time, min-order.
+      supplierIds.length > 0
+        ? withTimeout(
+            this.supplierProfileRepo.find({
+              select: ['supplierTenantId', 'deliveryZones', 'maxDeliveryDays', 'minOrderAmount'],
+              where: { supplierTenantId: In(supplierIds) },
+            }),
+            SIGNAL_TIMEOUT_MS, 'SupplierProfileLookup', this.logger,
+          )
+        : Promise.resolve([]),
     ]);
 
-    // Build typed supplier options with reliability scores merged in
+    // Normalize the pharmacy region for case-insensitive zone matching.
+    const pharmacyRegion = (pharmacyTenant?.region ?? '').trim().toLowerCase();
+    const profileBySupplier = new Map(
+      (supplierProfiles ?? []).map((p) => [p.supplierTenantId, p]),
+    );
+
+    /**
+     * Coverage rule (conservative — only excludes on positive evidence):
+     *   - No region on file for the pharmacy → cannot judge → serve.
+     *   - Supplier has no configured deliveryZones → "serves everywhere".
+     *   - Supplier lists zones AND region is known AND region not in zones
+     *     → does NOT cover this pharmacy → exclude.
+     */
+    const servesRegion = (profile?: { deliveryZones?: string[] }): boolean => {
+      if (!pharmacyRegion) return true;
+      const zones = (profile?.deliveryZones ?? []).map((z) => String(z).trim().toLowerCase());
+      if (zones.length === 0) return true;
+      return zones.includes(pharmacyRegion);
+    };
+
+    // Build typed supplier options with reliability + delivery metadata merged in.
+    const geoRejectedOptions: RejectedOption[] = [];
     const supplierOptions: SupplierOptionWithScore[] = availableSuppliers
       .map((catalog) => {
         const score = (reliabilityMap ?? new Map()).get(catalog.supplierTenantId);
+        const profile = profileBySupplier.get(catalog.supplierTenantId);
+        const companyName = (catalog as any).supplierTenant?.name ?? 'مورد';
+        const covers = servesRegion(profile);
+        if (!covers) {
+          geoRejectedOptions.push({
+            name: companyName,
+            type: 'supplier',
+            rejectedReason: `لا يغطي منطقة التوصيل (${pharmacyTenant?.region ?? '—'})`,
+          });
+        }
         return {
           supplierTenantId: catalog.supplierTenantId,
-          companyName: (catalog as any).supplierTenant?.name ?? 'مورد',
+          companyName,
           unitPrice: Number(catalog.price),
           stock: catalog.stock,
           currency: catalog.currency,
@@ -217,9 +269,21 @@ export class ProcurementOrchestrator {
           reliabilityScore: Number(score?.overallScore ?? 50),
           reliabilityLabel: score?.reliabilityLabel ?? 'medium',
           avgDeliveryDays: score?.avgDeliveryDays ?? LEAD_TIME_DAYS_DEFAULT,
+          servesRegion: covers,
+          deliveryDays: profile?.maxDeliveryDays != null ? Number(profile.maxDeliveryDays) : null,
+          minOrderAmount: profile?.minOrderAmount != null ? Number(profile.minOrderAmount) : 0,
         };
       })
-      .sort((a, b) => b.reliabilityScore - a.reliabilityScore); // best reliability first
+      // Hard-filter: suppliers proven NOT to cover the region are removed from
+      // the plan entirely — they surface in rejectedOptions instead.
+      .filter((s) => s.servesRegion)
+      // Rank: best reliability first, then faster quoted delivery as tie-break.
+      .sort((a, b) => {
+        if (b.reliabilityScore !== a.reliabilityScore) return b.reliabilityScore - a.reliabilityScore;
+        const da = a.deliveryDays ?? a.avgDeliveryDays;
+        const db = b.deliveryDays ?? b.avgDeliveryDays;
+        return da - db;
+      });
 
     // Build typed P2P options
     const p2pListings: P2PListingOption[] = (p2pResult?.data ?? [])
@@ -260,6 +324,7 @@ export class ProcurementOrchestrator {
       isSpiking,
       wallet,
       supplierOptions,
+      geoRejectedOptions,
       p2pListings,
       priceVolatility,
       avgHistoricalPrice,
@@ -324,6 +389,20 @@ export class ProcurementOrchestrator {
 
   // ─── LAYER 4: PLAN GENERATION ─────────────────────────────────────────────────
 
+  /**
+   * Human-readable Arabic reason for a supplier split, appending the quoted
+   * delivery lead time when the supplier profile provides one. Keeps the
+   * primary selection driver (reliability) up front and adds the ETA so the
+   * pharmacist sees delivery context, not just price/reliability.
+   */
+  private supplierSplitReason(base: string, supplier: SupplierOptionWithScore): string {
+    const eta = supplier.deliveryDays ?? supplier.avgDeliveryDays;
+    if (eta != null && Number.isFinite(eta) && eta > 0) {
+      return `${base} · توصيل خلال ~${eta} يوم`;
+    }
+    return base;
+  }
+
   private generateSplitPlan(
     productId: string,
     productName: string,
@@ -339,6 +418,13 @@ export class ProcurementOrchestrator {
     const splits: PlanSplit[] = [];
     const rejectedOptions: RejectedOption[] = [];
     let remaining = qtyRequired;
+
+    // Suppliers excluded because they don't deliver to the pharmacy's region.
+    // Surfaced first so the explainability trail shows WHY a cheaper supplier
+    // was skipped (delivery coverage, not price).
+    for (const geo of rawSignals.geoRejectedOptions ?? []) {
+      rejectedOptions.push(geo);
+    }
 
     // Rejected suppliers → rejected options list
     for (const rs of rejectedSuppliers) {
@@ -382,7 +468,7 @@ export class ProcurementOrchestrator {
           qty: takeQty,
           unitPrice: primarySupplier.unitPrice,
           reliabilityScore: primarySupplier.reliabilityScore,
-          reason: 'أعلى موثوقية',
+          reason: this.supplierSplitReason('أعلى موثوقية', primarySupplier),
         });
         remaining -= takeQty;
       }
@@ -400,7 +486,7 @@ export class ProcurementOrchestrator {
           qty: takeQty,
           unitPrice: backup.unitPrice,
           reliabilityScore: backup.reliabilityScore,
-          reason: 'مورد احتياطي',
+          reason: this.supplierSplitReason('مورد احتياطي', backup),
         });
         remaining -= takeQty;
       }

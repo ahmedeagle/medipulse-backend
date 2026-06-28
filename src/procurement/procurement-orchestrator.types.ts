@@ -17,6 +17,19 @@ export interface SupplierOptionWithScore {
   reliabilityScore: number;
   reliabilityLabel: string;
   avgDeliveryDays: number;
+  /**
+   * Delivery coverage relative to the buying pharmacy's region.
+   * - true  → supplier explicitly serves the pharmacy's region, OR has no
+   *           configured delivery zones (treated as "serves everywhere").
+   * - false → supplier lists delivery zones that do NOT include the region.
+   *           Such suppliers are filtered out of the plan and surfaced as
+   *           rejected options ("لا يغطي منطقتك").
+   */
+  servesRegion: boolean;
+  /** Quoted max lead time (days) from the supplier profile, when available. */
+  deliveryDays: number | null;
+  /** Minimum order amount (supplier currency) from the profile. */
+  minOrderAmount: number;
 }
 
 export interface NormalizedSignalBundle {

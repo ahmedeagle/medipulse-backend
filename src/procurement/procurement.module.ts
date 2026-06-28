@@ -16,6 +16,8 @@ import { ProcurementDraft } from './entities/procurement-draft.entity';
 import { AiRecommendation } from '../ai/entities/ai-recommendation.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 import { SupplierReliabilityScore } from '../supplier/entities/supplier-reliability-score.entity';
+import { SupplierProfile } from '../supplier/entities/supplier-profile.entity';
+import { Tenant } from '../auth/entities/tenant.entity';
 import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { Order } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
@@ -36,6 +38,8 @@ import { AnalyticsModule } from '../analytics/analytics.module';
       AiRecommendation,
       SupplierCatalogItem,
       SupplierReliabilityScore,
+      SupplierProfile,
+      Tenant,
       InventoryItem,
       Order,
       OrderItem,

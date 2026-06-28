@@ -66,14 +66,16 @@ const SUPPLIER_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
 const PHARMACY_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
   [OrderStatus.DRAFT]:            [OrderStatus.SUBMITTED, OrderStatus.CANCELLED],
   [OrderStatus.PENDING_APPROVAL]: [OrderStatus.SUBMITTED, OrderStatus.CANCELLED],
+  [OrderStatus.SUBMITTED]:        [OrderStatus.CANCELLED],   // withdraw before supplier acts
   [OrderStatus.COUNTER_OFFER]:    [OrderStatus.ACCEPTED, OrderStatus.CANCELLED],
+  [OrderStatus.ACCEPTED]:         [OrderStatus.ON_HOLD, OrderStatus.CANCELLED],
   [OrderStatus.SHIPPED]:          [OrderStatus.RECEIVED_PENDING_QC, OrderStatus.FAILED_DELIVERY],
   [OrderStatus.FAILED_DELIVERY]:  [OrderStatus.SHIPPED, OrderStatus.CANCELLED],
   [OrderStatus.ON_HOLD]:          [OrderStatus.ACCEPTED, OrderStatus.CANCELLED],
   [OrderStatus.RECEIVED_PENDING_QC]:[OrderStatus.DELIVERED, OrderStatus.PARTIALLY_DELIVERED, OrderStatus.DISPUTED],
   [OrderStatus.DELIVERED]:        [OrderStatus.DISPUTED, OrderStatus.RETURN_REQUESTED],
   [OrderStatus.PARTIALLY_DELIVERED]:[OrderStatus.DELIVERED, OrderStatus.DISPUTED, OrderStatus.RETURN_REQUESTED],
-  [OrderStatus.DISPUTED]:         [OrderStatus.RETURN_REQUESTED],
+  [OrderStatus.DISPUTED]:         [OrderStatus.DELIVERED, OrderStatus.RETURN_REQUESTED],
 };
 
 @Injectable()
@@ -399,6 +401,19 @@ export class OrdersService {
       );
     }
 
+    // Role-aware guard: pharmacy may only perform pharmacy-owned transitions.
+    // (Supplier transitions are additionally gated at the route level.) This
+    // keeps the shared status route safe now that pharmacy can call it for
+    // submit / cancel / accept-counter / receive-flow actions.
+    if (user.role === Role.PHARMACY_ADMIN) {
+      const pharmacyAllowed = PHARMACY_TRANSITIONS[order.status] ?? [];
+      if (!pharmacyAllowed.includes(newStatus)) {
+        throw new ForbiddenException(
+          `Pharmacy cannot transition order from "${order.status}" to "${newStatus}".`,
+        );
+      }
+    }
+
     const historyEntry: OrderHistoryEntry = {
       from: order.status, to: newStatus, changedBy: user.id,
       changedByRole: user.role, at: new Date().toISOString(), reason: opts.reason,
@@ -471,6 +486,103 @@ export class OrdersService {
     }
     if (newStatus === OrderStatus.RETURN_REQUESTED) this.eventEmitter.emit('order.return_requested', { orderId: id, pharmacyTenantId: order.pharmacyTenantId });
     if (newStatus === OrderStatus.DISPUTED)         this.eventEmitter.emit('order.disputed',         { orderId: id, reason: opts.reason });
+
+    return this.orderRepo.findOne({ where: { id }, relations: ['items', 'items.product', 'pharmacyTenant', 'supplierTenant'] });
+  }
+
+  // ─── Edit line quantities (pharmacy, before supplier acts) ────────────────
+
+  /**
+   * Lets the buying pharmacy adjust ordered quantities (or drop a line by
+   * passing quantity 0) while the order is still in an editable state — i.e.
+   * before the supplier has accepted/shipped it. Unit prices are NOT editable
+   * (they come from the supplier catalogue). Totals and per-line totalPrice are
+   * recomputed using the order's stored VAT rate so the maths stays consistent
+   * with the original create() path, and the change is recorded in the audit
+   * trail (changeHistory + order.edited domain event).
+   */
+  async updateItems(
+    user: { id: string; role: string; tenantId: string },
+    id: string,
+    items: Array<{ orderItemId: string; quantity: number }>,
+  ): Promise<Order> {
+    const EDITABLE: OrderStatus[] = [OrderStatus.DRAFT, OrderStatus.PENDING_APPROVAL, OrderStatus.SUBMITTED];
+
+    const order = await this.orderRepo.findOne({ where: { id }, relations: ['items'] });
+    if (!order) throw new NotFoundException(`Order ${id} not found`);
+    if (order.pharmacyTenantId !== user.tenantId) throw new ForbiddenException();
+    if (!EDITABLE.includes(order.status)) {
+      throw new BadRequestException(
+        `Order can only be edited before the supplier acts (status draft / pending_approval / submitted). Current: "${order.status}".`,
+      );
+    }
+    if (!items?.length) throw new BadRequestException('No items supplied');
+
+    // Map requested quantities onto the order's real line items.
+    const qtyById = new Map<string, number>();
+    for (const it of items) {
+      if (!Number.isInteger(it.quantity) || it.quantity < 0) {
+        throw new BadRequestException(`Invalid quantity for item ${it.orderItemId}`);
+      }
+      const line = order.items.find((l) => l.id === it.orderItemId);
+      if (!line) throw new BadRequestException(`Item ${it.orderItemId} does not belong to this order`);
+      qtyById.set(it.orderItemId, it.quantity);
+    }
+
+    // Lines the caller did not mention keep their current quantity.
+    const resolved = order.items.map((l) => ({
+      id: l.id,
+      unitPrice: Number(l.unitPrice),
+      quantity: qtyById.has(l.id) ? qtyById.get(l.id)! : Number(l.quantity),
+    }));
+    const kept = resolved.filter((r) => r.quantity > 0);
+    const removed = resolved.filter((r) => r.quantity <= 0);
+    if (!kept.length) throw new BadRequestException('An order must keep at least one item with quantity greater than zero');
+
+    // Recompute totals with the order's stored VAT rate (mirrors create()).
+    const vatRate        = Number(order.vatRate ?? 0);
+    const subtotalAmount = kept.reduce((s, r) => s + r.quantity * r.unitPrice, 0);
+    const vatAmount      = Math.round(subtotalAmount * vatRate * 100) / 100;
+    const totalAmount    = Math.round((subtotalAmount + vatAmount) * 100) / 100;
+
+    const historyEntry: OrderHistoryEntry = {
+      from: order.status, to: order.status, changedBy: user.id, changedByRole: user.role,
+      at: new Date().toISOString(),
+      reason: `تعديل الأصناف: ${kept.length} صنف${removed.length ? ` (حُذف ${removed.length})` : ''} — الإجمالي ${totalAmount}`,
+    };
+
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction('READ COMMITTED');
+    try {
+      for (const r of kept) {
+        await qr.manager.update(OrderItem, r.id, {
+          quantity:   r.quantity,
+          totalPrice: Math.round(r.quantity * r.unitPrice * 100) / 100,
+        });
+      }
+      for (const r of removed) {
+        await qr.manager.delete(OrderItem, r.id);
+      }
+      await qr.manager.update(Order, id, {
+        subtotalAmount,
+        vatAmount,
+        totalAmount,
+        changeHistory: [...(order.changeHistory ?? []), historyEntry],
+      });
+      await qr.commitTransaction();
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
+
+    // Audit + downstream listeners (name contains '.' → persisted by store listener).
+    this.eventEmitter.emit('order.edited', {
+      orderId: id, pharmacyTenantId: order.pharmacyTenantId, supplierTenantId: order.supplierTenantId,
+      editedBy: user.id, itemCount: kept.length, removedCount: removed.length, totalAmount,
+    });
 
     return this.orderRepo.findOne({ where: { id }, relations: ['items', 'items.product', 'pharmacyTenant', 'supplierTenant'] });
   }

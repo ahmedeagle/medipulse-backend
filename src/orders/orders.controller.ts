@@ -91,6 +91,16 @@ class InitiateReturnDto {
   items: ReturnItemDto[];
 }
 
+class EditItemDto {
+  @IsUUID()        orderItemId: string;
+  @IsInt() @Min(0) quantity:    number;   // 0 = remove the line
+}
+
+class UpdateItemsDto {
+  @IsArray() @Type(() => EditItemDto)
+  items: EditItemDto[];
+}
+
 // ── Controller ────────────────────────────────────────────────────────────────
 
 @ApiTags('orders')
@@ -176,11 +186,11 @@ export class OrdersController {
     return this.ordersService.create(user.tenantId, dto, user);
   }
 
-  // ── Status transitions (supplier-owned) ───────────────────────────────────
+  // ── Status transitions (role-aware: supplier + pharmacy) ──────────────────
 
   @Patch(':id/status')
-  @Roles(Role.SUPPLIER_ADMIN)
-  @ApiOperation({ summary: 'Update order status (supplier side: accept, ship, back-order, etc.)' })
+  @Roles(Role.PHARMACY_ADMIN, Role.SUPPLIER_ADMIN)
+  @ApiOperation({ summary: 'Update order status. Supplier: accept/ship/back-order/counter. Pharmacy: submit/cancel/accept-counter/receive-flow. Each role is restricted to its own transitions.' })
   @ApiBadRequestResponse({ description: 'Invalid status transition' })
   updateStatus(
     @CurrentUser() user: any,
@@ -188,6 +198,24 @@ export class OrdersController {
     @Body() dto: UpdateOrderStatusDto,
   ) {
     return this.ordersService.updateStatus(user, id, dto.status, { reason: (dto as any).reason });
+  }
+
+  // ── Edit line quantities (pharmacy, before supplier acts) ─────────────────
+
+  @Patch(':id/items')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: 'Edit ordered quantities before the supplier acts',
+    description: 'Allowed only while the order is in draft / pending_approval / submitted. Pass quantity 0 to drop a line. Unit prices are not editable; totals + VAT are recomputed and the change is audit-logged.',
+  })
+  @ApiBody({ type: UpdateItemsDto })
+  @ApiBadRequestResponse({ description: 'Order not editable or invalid quantities' })
+  updateItems(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateItemsDto,
+  ) {
+    return this.ordersService.updateItems(user, id, dto.items);
   }
 
   // ── Approval (pharmacy director) ──────────────────────────────────────────

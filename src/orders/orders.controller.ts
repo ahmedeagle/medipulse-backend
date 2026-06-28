@@ -92,8 +92,12 @@ class InitiateReturnDto {
 }
 
 class EditItemDto {
-  @IsUUID()        orderItemId: string;
-  @IsInt() @Min(0) quantity:    number;   // 0 = remove the line
+  // Edit an existing line: pass orderItemId (quantity 0 removes it).
+  // Add a new line: pass productId (quantity > 0); price comes from the
+  // order's supplier catalogue.
+  @IsOptional() @IsUUID() orderItemId?: string;
+  @IsOptional() @IsUUID() productId?:   string;
+  @IsInt() @Min(0)        quantity:     number;   // 0 = remove the line
 }
 
 class UpdateItemsDto {
@@ -202,11 +206,26 @@ export class OrdersController {
 
   // ── Edit line quantities (pharmacy, before supplier acts) ─────────────────
 
+  @Get(':id/supplier-catalog')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({
+    summary: "Search the order supplier's catalogue (to add products to an editable order)",
+    description: 'Returns available products from the order\'s supplier that are not already on the order, with prices. Optional `search` filters by product name/SKU.',
+  })
+  @ApiQuery({ name: 'search', required: false })
+  searchSupplierCatalog(
+    @CurrentUser() user: any,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('search') search?: string,
+  ) {
+    return this.ordersService.searchSupplierCatalogForOrder(user, id, search);
+  }
+
   @Patch(':id/items')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({
-    summary: 'Edit ordered quantities before the supplier acts',
-    description: 'Allowed only while the order is in draft / pending_approval / submitted. Pass quantity 0 to drop a line. Unit prices are not editable; totals + VAT are recomputed and the change is audit-logged.',
+    summary: 'Edit ordered quantities or add products before the supplier acts',
+    description: 'Allowed only while the order is in draft / pending_approval / submitted. Pass {orderItemId, quantity} to edit a line (quantity 0 drops it) or {productId, quantity} to add a product from the same supplier (priced from the supplier catalogue). Totals + VAT are recomputed and the change is audit-logged.',
   })
   @ApiBody({ type: UpdateItemsDto })
   @ApiBadRequestResponse({ description: 'Order not editable or invalid quantities' })

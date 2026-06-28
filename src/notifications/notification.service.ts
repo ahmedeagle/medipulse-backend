@@ -11,6 +11,14 @@ export interface CreateNotificationDto {
   body:        string;
   resourceRef?: string;
   emailSent?:  boolean;
+  /**
+   * Optional coalescing window (ms). When set, a near-identical notification
+   * already created within the window is reused instead of inserting a new
+   * row — kills repeat-spam (e.g. the same purchase task notified every cron
+   * run). Dedup key defaults to `resourceRef` when present, else `title`.
+   */
+  dedupeWindowMs?: number;
+  dedupeBy?: 'resourceRef' | 'title';
 }
 
 @Injectable()
@@ -21,7 +29,29 @@ export class NotificationService {
   ) {}
 
   async create(dto: CreateNotificationDto): Promise<Notification> {
-    return this.repo.save(this.repo.create(dto));
+    const { dedupeWindowMs, dedupeBy, ...row } = dto;
+
+    if (dedupeWindowMs && dedupeWindowMs > 0) {
+      const since = new Date(Date.now() - dedupeWindowMs);
+      const by = dedupeBy ?? (row.resourceRef ? 'resourceRef' : 'title');
+      const qb = this.repo
+        .createQueryBuilder('n')
+        .where('n.tenantId = :tenantId', { tenantId: row.tenantId })
+        .andWhere('n.type = :type', { type: row.type })
+        .andWhere('n.createdAt >= :since', { since });
+      if (by === 'resourceRef' && row.resourceRef) {
+        qb.andWhere('n.resourceRef = :ref', { ref: row.resourceRef });
+      } else {
+        qb.andWhere('n.title = :title', { title: row.title });
+      }
+      if (row.userId) {
+        qb.andWhere('(n.userId = :userId OR n.userId IS NULL)', { userId: row.userId });
+      }
+      const existing = await qb.getOne();
+      if (existing) return existing;
+    }
+
+    return this.repo.save(this.repo.create(row));
   }
 
   async findForUser(

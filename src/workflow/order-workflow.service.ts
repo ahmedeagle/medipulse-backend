@@ -81,6 +81,10 @@ export class OrderWorkflowService {
         title:       'Order Requires Director Approval',
         body:        `Order #${event.orderId.slice(0, 8)} (SAR ${event.totalAmount.toLocaleString()}) requires your approval before submission.`,
         resourceRef: `order:${event.orderId}`,
+        // One approval-required notification per order per day — repeated
+        // emits for the same order must not stack up in the bell.
+        dedupeWindowMs: 24 * 60 * 60 * 1000,
+        dedupeBy: 'resourceRef',
       });
     } catch (err: any) {
       this.logger.error(`onApprovalRequired failed: ${err.message}`);

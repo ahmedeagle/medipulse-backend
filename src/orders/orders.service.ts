@@ -504,7 +504,7 @@ export class OrdersService {
   async updateItems(
     user: { id: string; role: string; tenantId: string },
     id: string,
-    items: Array<{ orderItemId: string; quantity: number }>,
+    items: Array<{ orderItemId?: string; productId?: string; quantity: number }>,
   ): Promise<Order> {
     const EDITABLE: OrderStatus[] = [OrderStatus.DRAFT, OrderStatus.PENDING_APPROVAL, OrderStatus.SUBMITTED];
 
@@ -518,15 +518,47 @@ export class OrdersService {
     }
     if (!items?.length) throw new BadRequestException('No items supplied');
 
-    // Map requested quantities onto the order's real line items.
+    // Split the payload: entries with an orderItemId edit an existing line;
+    // entries with only a productId ADD a new line (priced from the supplier
+    // catalogue). Adding a product that already exists folds into a quantity
+    // change on the existing line instead of creating a duplicate.
     const qtyById = new Map<string, number>();
+    const additions = new Map<string, number>(); // productId → quantity to add
+
     for (const it of items) {
       if (!Number.isInteger(it.quantity) || it.quantity < 0) {
-        throw new BadRequestException(`Invalid quantity for item ${it.orderItemId}`);
+        throw new BadRequestException(`Invalid quantity (${it.quantity})`);
       }
-      const line = order.items.find((l) => l.id === it.orderItemId);
-      if (!line) throw new BadRequestException(`Item ${it.orderItemId} does not belong to this order`);
-      qtyById.set(it.orderItemId, it.quantity);
+      if (it.orderItemId) {
+        const line = order.items.find((l) => l.id === it.orderItemId);
+        if (!line) throw new BadRequestException(`Item ${it.orderItemId} does not belong to this order`);
+        qtyById.set(it.orderItemId, it.quantity);
+      } else if (it.productId) {
+        if (it.quantity <= 0) throw new BadRequestException('New items must have a quantity greater than zero');
+        additions.set(it.productId, (additions.get(it.productId) ?? 0) + it.quantity);
+      } else {
+        throw new BadRequestException('Each item needs an orderItemId (edit) or a productId (add)');
+      }
+    }
+
+    // Resolve additions: fold into existing lines where possible, otherwise
+    // validate against the supplier catalogue and price from it.
+    const newLines: Array<{ productId: string; quantity: number; unitPrice: number }> = [];
+    for (const [productId, addQty] of additions) {
+      const existing = order.items.find((l) => l.productId === productId);
+      if (existing) {
+        // Already on the order → treat as "add to current quantity".
+        const base = qtyById.has(existing.id) ? qtyById.get(existing.id)! : Number(existing.quantity);
+        qtyById.set(existing.id, base + addQty);
+        continue;
+      }
+      const listing = await this.catalogRepo.findOne({
+        where: { supplierTenantId: order.supplierTenantId, productId, isAvailable: true },
+      });
+      if (!listing) {
+        throw new BadRequestException(`المورد لا يوفّر هذا المنتج أو أنه غير متاح حالياً`);
+      }
+      newLines.push({ productId, quantity: addQty, unitPrice: Number(listing.price) });
     }
 
     // Lines the caller did not mention keep their current quantity.
@@ -537,18 +569,24 @@ export class OrdersService {
     }));
     const kept = resolved.filter((r) => r.quantity > 0);
     const removed = resolved.filter((r) => r.quantity <= 0);
-    if (!kept.length) throw new BadRequestException('An order must keep at least one item with quantity greater than zero');
+    if (!kept.length && !newLines.length) {
+      throw new BadRequestException('An order must keep at least one item with quantity greater than zero');
+    }
 
     // Recompute totals with the order's stored VAT rate (mirrors create()).
     const vatRate        = Number(order.vatRate ?? 0);
-    const subtotalAmount = kept.reduce((s, r) => s + r.quantity * r.unitPrice, 0);
+    const keptSubtotal   = kept.reduce((s, r) => s + r.quantity * r.unitPrice, 0);
+    const newSubtotal    = newLines.reduce((s, r) => s + r.quantity * r.unitPrice, 0);
+    const subtotalAmount = keptSubtotal + newSubtotal;
     const vatAmount      = Math.round(subtotalAmount * vatRate * 100) / 100;
     const totalAmount    = Math.round((subtotalAmount + vatAmount) * 100) / 100;
 
+    const addedNote   = newLines.length ? ` (أُضيف ${newLines.length})` : '';
+    const removedNote = removed.length ? ` (حُذف ${removed.length})` : '';
     const historyEntry: OrderHistoryEntry = {
       from: order.status, to: order.status, changedBy: user.id, changedByRole: user.role,
       at: new Date().toISOString(),
-      reason: `تعديل الأصناف: ${kept.length} صنف${removed.length ? ` (حُذف ${removed.length})` : ''} — الإجمالي ${totalAmount}`,
+      reason: `تعديل الأصناف: ${kept.length + newLines.length} صنف${addedNote}${removedNote} — الإجمالي ${totalAmount}`,
     };
 
     const qr = this.dataSource.createQueryRunner();
@@ -563,6 +601,15 @@ export class OrdersService {
       }
       for (const r of removed) {
         await qr.manager.delete(OrderItem, r.id);
+      }
+      for (const n of newLines) {
+        await qr.manager.insert(OrderItem, {
+          orderId:    id,
+          productId:  n.productId,
+          quantity:   n.quantity,
+          unitPrice:  n.unitPrice,
+          totalPrice: Math.round(n.quantity * n.unitPrice * 100) / 100,
+        });
       }
       await qr.manager.update(Order, id, {
         subtotalAmount,
@@ -581,10 +628,61 @@ export class OrdersService {
     // Audit + downstream listeners (name contains '.' → persisted by store listener).
     this.eventEmitter.emit('order.edited', {
       orderId: id, pharmacyTenantId: order.pharmacyTenantId, supplierTenantId: order.supplierTenantId,
-      editedBy: user.id, itemCount: kept.length, removedCount: removed.length, totalAmount,
+      editedBy: user.id, itemCount: kept.length + newLines.length, removedCount: removed.length, totalAmount,
     });
 
     return this.orderRepo.findOne({ where: { id }, relations: ['items', 'items.product', 'pharmacyTenant', 'supplierTenant'] });
+  }
+
+  /**
+   * Search the catalogue of the order's supplier so the pharmacy can add new
+   * products to an editable order. Scoped to the order's own supplier (and
+   * gated by order ownership) so a pharmacy can only browse the supplier it is
+   * already transacting with. Products already on the order are excluded — they
+   * are edited via their existing line, not re-added.
+   */
+  async searchSupplierCatalogForOrder(
+    user: { id: string; role: string; tenantId: string },
+    id: string,
+    search?: string,
+    limit = 20,
+  ): Promise<Array<{ productId: string; name: string; nameAr: string | null; price: number; currency: string; stock: number }>> {
+    const order = await this.orderRepo.findOne({ where: { id }, relations: ['items'] });
+    if (!order) throw new NotFoundException(`Order ${id} not found`);
+    if (order.pharmacyTenantId !== user.tenantId) throw new ForbiddenException();
+
+    const alreadyOnOrder = order.items.map((l) => l.productId);
+
+    const qb = this.catalogRepo
+      .createQueryBuilder('c')
+      .innerJoinAndSelect('c.product', 'product')
+      .where('c.supplierTenantId = :supplierTenantId', { supplierTenantId: order.supplierTenantId })
+      .andWhere('c.isAvailable = true')
+      .andWhere('c.deletedAt IS NULL');
+
+    if (alreadyOnOrder.length) {
+      qb.andWhere('c.productId NOT IN (:...alreadyOnOrder)', { alreadyOnOrder });
+    }
+    const term = (search ?? '').trim();
+    if (term) {
+      qb.andWhere('(product.name ILIKE :term OR product.nameAr ILIKE :term OR product.genericName ILIKE :term OR product.sku ILIKE :term)', {
+        term: `%${term}%`,
+      });
+    }
+
+    const rows = await qb
+      .orderBy('product.name', 'ASC')
+      .limit(Math.min(Math.max(limit, 1), 50))
+      .getMany();
+
+    return rows.map((c) => ({
+      productId: c.productId,
+      name:      c.product?.name ?? '—',
+      nameAr:    c.product?.nameAr ?? null,
+      price:     Number(c.price),
+      currency:  c.currency,
+      stock:     c.stock,
+    }));
   }
 
   // ─── Approve (director sign-off for large orders) ─────────────────────────

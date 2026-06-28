@@ -759,6 +759,11 @@ export class AgentBridgeService {
         title,
         body,
         resourceRef: `approval:${approval.id}`,
+        // Coalesce repeat purchase notifications: the same supplier/product
+        // task re-surfacing within a day must NOT re-spam the bell. Approval
+        // ids differ across re-creation, so dedup on the (type, title) pair.
+        dedupeWindowMs: 24 * 60 * 60 * 1000,
+        dedupeBy: 'title',
       });
     } catch (err) {
       this.logger.warn(

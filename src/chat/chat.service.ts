@@ -1091,28 +1091,37 @@ export class ChatService {
 
   // ── Tool 3: Low-stock items ───────────────────────────────────────────────
   private async toolLowStockItems(tenantId: string, limit: number) {
+    // "Needs reorder" = stock at/below the EFFECTIVE trigger, which is the
+    // greater of the manual minThreshold and the demand-based reorder point
+    // (procurement_schedules). This keeps the list consistent with the
+    // single-product reorder recommendation, so demand-driven items (e.g. a
+    // fast mover sitting above its manual floor but below its reorder point)
+    // are not silently missed. Falls back to minThreshold when no schedule.
     const rows = await this.dataSource.query<{
-      name: string; name_ar: string; qty: string; min_threshold: string;
+      name: string; name_ar: string; qty: string; min_threshold: string; trigger: string;
     }[]>(`
       SELECT p.name,
              p."nameAr"       AS name_ar,
              i.quantity       AS qty,
-             i."minThreshold" AS min_threshold
+             i."minThreshold" AS min_threshold,
+             GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0))::int AS trigger
       FROM   inventory_items i
       JOIN   products p ON p.id = i."productId"
+      LEFT JOIN procurement_schedules s
+             ON s."productId" = i."productId" AND s."tenantId" = $1
       WHERE  i."pharmacyTenantId" = $1
         AND  i."deletedAt"        IS NULL
-        AND  i.quantity           <= i."minThreshold"
-      ORDER BY (i.quantity::float / NULLIF(i."minThreshold"::float, 1)) ASC
+        AND  i.quantity <= GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0))
+      ORDER BY (i.quantity::float / NULLIF(GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0))::float, 1)) ASC
       LIMIT  $2
     `, [tenantId, limit]);
 
     const items = rows.map((r) => ({
       name:         r.name_ar || r.name,
       qty:          Number(r.qty),
-      minThreshold: Number(r.min_threshold),
-      coveragePct:  Number(r.min_threshold) > 0
-        ? Math.round((Number(r.qty) / Number(r.min_threshold)) * 100)
+      minThreshold: Number(r.trigger),
+      coveragePct:  Number(r.trigger) > 0
+        ? Math.round((Number(r.qty) / Number(r.trigger)) * 100)
         : 0,
     }));
 
@@ -1126,7 +1135,7 @@ export class ChatService {
         columns: [
           { key: 'name',     header: 'المنتج' },
           { key: 'qty',      header: 'المتاح',  align: 'end' },
-          { key: 'min',      header: 'الحد الأدنى', align: 'end' },
+          { key: 'min',      header: 'حد إعادة الطلب', align: 'end' },
           { key: 'coverage', header: 'التغطية %', align: 'end' },
         ],
         rows: items.map((i) => ({

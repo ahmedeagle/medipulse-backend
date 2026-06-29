@@ -22,6 +22,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../common/enums/role.enum';
 import { AuditRead } from '../audit/decorators/audit-read.decorator';
+import { HijriCalendar } from '../common/utils/hijri-calendar';
 
 @ApiTags('forecasting')
 @ApiBearerAuth('access-token')
@@ -92,6 +93,46 @@ export class ForecastingController {
   @ApiOkResponse({ description: '{ value: number, count: number }' })
   getDeadStockSummary(@CurrentUser() user: any) {
     return this.deadStockSvc.getTotalDeadStockValue(user.tenantId);
+  }
+
+  @Get('seasonality')
+  @ApiOperation({
+    summary: 'Active and upcoming seasonal demand events (Hijri-calendar based)',
+    description:
+      'Returns the currently active demand season (Hajj, Ramadan, school return, etc.) ' +
+      'and the next upcoming season within 45 days, each with the affected product ' +
+      'categories and their demand multipliers. Requires no sales history — works from day one.',
+  })
+  @ApiOkResponse()
+  getSeasonality() {
+    const now = new Date();
+    const activeEvent = HijriCalendar.getActiveEvent(now);
+    const upcoming = HijriCalendar.getUpcomingEvent(now, 45);
+
+    const toCategories = (key: string) =>
+      HijriCalendar.getEventCategoryMultipliers(key).map((c) => ({
+        category: c.category,
+        multiplier: c.multiplier,
+        upliftPct: Math.round((c.multiplier - 1) * 100),
+      }));
+
+    return {
+      active: activeEvent
+        ? {
+            event: activeEvent.event,
+            arabicName: activeEvent.arabicName,
+            categories: toCategories(activeEvent.event),
+          }
+        : null,
+      upcoming: upcoming
+        ? {
+            event: upcoming.event.event,
+            arabicName: upcoming.event.arabicName,
+            daysUntil: upcoming.daysUntil,
+            categories: toCategories(upcoming.event.event),
+          }
+        : null,
+    };
   }
 
   @Post('refresh')

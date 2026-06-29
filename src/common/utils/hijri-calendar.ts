@@ -231,6 +231,44 @@ export class HijriCalendar {
   }
 
   /**
+   * Return the affected categories for an event with their demand multipliers,
+   * sorted by impact (highest first). Used by the seasonality banner UI.
+   * Skips the `_default` wildcard and any de-boost (<1.0) entries so the banner
+   * only surfaces "stock up" signals.
+   */
+  static getEventCategoryMultipliers(
+    eventKey: string,
+    limit = 6,
+  ): { category: string; multiplier: number }[] {
+    const multipliers = EVENT_MULTIPLIERS[eventKey] ?? {};
+    return Object.entries(multipliers)
+      .filter(([key, mult]) => key !== '_default' && mult > 1.0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([category, multiplier]) => ({ category, multiplier }));
+  }
+
+  /**
+   * Scan forward up to `horizonDays` to find the next demand event that is not
+   * already active today. Returns the event plus how many days until it starts.
+   * Used to show an "upcoming season" banner before the spike hits.
+   */
+  static getUpcomingEvent(
+    date: Date = new Date(),
+    horizonDays = 45,
+  ): { event: DemandEvent; daysUntil: number } | null {
+    const todayEvent = this.getActiveEvent(date)?.event ?? null;
+    for (let i = 1; i <= horizonDays; i++) {
+      const future = new Date(date.getTime() + i * 86_400_000);
+      const ev = this.getActiveEvent(future);
+      if (ev && ev.event !== todayEvent) {
+        return { event: ev, daysUntil: i };
+      }
+    }
+    return null;
+  }
+
+  /**
    * Check if today is within Hajj season — useful for quick branching.
    */
   static isHajjSeason(date: Date = new Date()): boolean {

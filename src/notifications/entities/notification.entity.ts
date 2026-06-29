@@ -42,6 +42,8 @@ export type NotificationType =
   | 'dead_stock'         // weekly dead-stock digest (high urgency items)
   // ── Feature Requests ─────────────────────────────────────────────────────
   | 'feature_request_update'   // chat feature request status changed (in_progress / resolved)
+  // ── Onboarding ────────────────────────────────────────────────────────────
+  | 'sales_history_upload_received'  // pharmacy uploaded historical sales/purchase files for ops to process
   // ── P2P AI Monitor ────────────────────────────────────────────────────────
   | 'p2p_order_action_required' // AI detected a stale/stuck order needing attention
   | 'p2p_order_reminder'        // nudge sent to seller to ship/respond

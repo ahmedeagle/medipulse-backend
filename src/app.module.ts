@@ -40,6 +40,7 @@ import { WhatsappModule }         from './channels/whatsapp/whatsapp.module';
 import { PosModule }              from './pos/pos.module';
 import { FraudModule }            from './fraud/fraud.module';
 import { MigrationAssistantModule } from './migration-assistant/migration-assistant.module';
+import { SalesHistoryModule } from './sales-history/sales-history.module';
 import { OnboardingModule }       from './onboarding/onboarding.module';
 import { FeatureRequestsModule }  from './feature-requests/feature-requests.module';
 import { PurchasesModule }        from './purchases/purchases.module';
@@ -147,7 +148,8 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     ChatModule,
     FraudModule,
     FeatureRequestsModule,
-    MigrationAssistantModule,    // ── Channels (WhatsApp — disabled unless WHATSAPP_ENABLED=true) ────────
+    MigrationAssistantModule,
+    SalesHistoryModule,    // ── Channels (WhatsApp — disabled unless WHATSAPP_ENABLED=true) ────────
     OnboardingModule,
     WhatsappModule,    // ── Point of Sale ─────────────────────────────────────────────────────────
     PosModule,

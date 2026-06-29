@@ -10,6 +10,8 @@ import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.
 import { SupplierReliabilityScore } from '../supplier/entities/supplier-reliability-score.entity';
 import { PreferredSupplier } from '../supplier/entities/preferred-supplier.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
+import { ProphetForecastComparison } from './entities/prophet-forecast-comparison.entity';
+import { ProphetShadowService } from './prophet-shadow.service';
 
 /**
  * Imported only by WorkerAppModule.
@@ -26,9 +28,10 @@ import { Tenant } from '../auth/entities/tenant.entity';
       SupplierReliabilityScore,
       PreferredSupplier,
       Tenant,
+      ProphetForecastComparison,
     ]),
   ],
-  providers: [DemandForecastingService, EoqService],
+  providers: [DemandForecastingService, EoqService, ProphetShadowService],
   exports: [DemandForecastingService, EoqService],
 })
 export class ForecastingWorkerModule {}

@@ -5,6 +5,8 @@ import { DemandForecastingService } from './demand-forecasting.service';
 import { EoqService } from './eoq.service';
 import { DemandForecast } from './entities/demand-forecast.entity';
 import { ProcurementSchedule } from './entities/procurement-schedule.entity';
+import { ProphetForecastComparison } from './entities/prophet-forecast-comparison.entity';
+import { ProphetShadowService } from './prophet-shadow.service';
 import { ConsumptionSnapshot } from '../inventory/entities/consumption-snapshot.entity';
 import { InventoryItem } from '../inventory/entities/inventory-item.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
@@ -36,6 +38,7 @@ import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
       PreferredSupplier,
       PriceSnapshot,
       Tenant,
+      ProphetForecastComparison,
     ]),
     NotificationsModule,
     PharmacySettingsModule,
@@ -43,7 +46,7 @@ import { AiGovernanceModule } from '../ai-governance/ai-governance.module';
     forwardRef(() => AiGovernanceModule),
   ],
   controllers: [ForecastingController],
-  providers: [DemandForecastingService, EoqService, DeadStockService, DeadStockCron],
+  providers: [DemandForecastingService, EoqService, DeadStockService, DeadStockCron, ProphetShadowService],
   exports: [DemandForecastingService, EoqService, DeadStockService],
 })
 export class ForecastingModule {}

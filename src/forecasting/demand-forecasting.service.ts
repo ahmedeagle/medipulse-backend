@@ -6,6 +6,7 @@ import { DemandForecast } from './entities/demand-forecast.entity';
 import { ConsumptionSnapshot } from '../inventory/entities/consumption-snapshot.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { TenantType } from '../common/enums/tenant-type.enum';
+import { ProphetShadowService } from './prophet-shadow.service';
 
 /**
  * Holt-Winters Double Exponential Smoothing (Holt's Linear)
@@ -51,6 +52,7 @@ export class DemandForecastingService {
     private readonly snapshotRepo: Repository<ConsumptionSnapshot>,
     @InjectRepository(Tenant)
     private readonly tenantRepo: Repository<Tenant>,
+    private readonly prophetShadow: ProphetShadowService,
   ) {}
 
   // ─── Weekly cron: compute forecasts for all pharmacy-product pairs ────────
@@ -93,10 +95,25 @@ export class DemandForecastingService {
 
       if (snapshots.length < MIN_DATA_POINTS) continue;
 
+      let result14: ForecastResult | null = null;
       for (const horizonDays of HORIZONS) {
         const result = this.holtsLinearForecast(snapshots, horizonDays);
         await this.upsertForecast(tenantId, productId, weekStart, horizonDays, result);
+        if (horizonDays === 14) result14 = result;
         count++;
+      }
+
+      // Trust-gated shadow evaluation (no-op unless explicitly enabled).
+      // Never affects the persisted Holt-Winters forecast above.
+      if (result14 && this.prophetShadow.isEnabled()) {
+        await this.prophetShadow.compareInShadow(
+          tenantId,
+          productId,
+          weekStart,
+          14,
+          snapshots,
+          result14,
+        );
       }
     }
 

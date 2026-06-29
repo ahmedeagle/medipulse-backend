@@ -37,7 +37,7 @@ const SYSTEM_PROMPT = `أنت «المساعد التشغيلي» لـ MediPulse
 3. إجاباتك مختصرة وعملية: جملة افتتاحية + قائمة نقطية + توصية واحدة
 4. لا تذكر "قاعدة بيانات" أو "API" أو "أداة" — تحدث كمستشار خبير
 5. إذا سأل المستخدم "أين أجد..."، "كيف أفعل..."، "افتح لي..."، "خذني إلى..."، أو عن أي شاشة/ميزة في النظام → نادِ navigate_to_feature مع الوجهة المناسبة
-6. لأسئلة الأرباح والمبيعات والإيرادات والربحية وأداء الموردين والإنفاق → نادِ link_report لتوجيه المستخدم إلى التقرير الصحيح (لا تذكر أرقاماً)
+6. لأسئلة «كم بعت؟»، إجمالي البيع، الربح، الخسارة، صافي الربح، الهامش، أو أداء فترة (اليوم، هذا الشهر، الشهر الماضي، آخر أسبوع...) → نادِ get_financial_summary لإعطاء الأرقام مباشرة. أمّا للتفاصيل حسب المنتج/الفئة/المورد أو إنفاق المشتريات → نادِ link_report
 7. للتحيات (مرحبا، أهلاً، السلام عليكم)، الشكر، الأسئلة العامة مثل "ماذا تستطيع أن تفعل؟" أو "كيف تساعدني؟"، أو أي حديث ودّي أو سؤال إرشادي لا يحتاج بيانات حيّة → نادِ general_reply واكتب رداً ودوداً ومفيداً، واقترح وجهات مناسبة في suggest
 8. لأسئلة المواسم والمناسبات (رمضان، الحج، العودة للمدارس، "ماذا أجهّز للموسم القادم") → نادِ get_seasonal_outlook
 9. لأسئلة "كيف حال صيدليتي"، "ملخص سريع"، "موجز اليوم"، "أين أركّز اليوم" → نادِ get_business_brief
@@ -214,6 +214,22 @@ const CHAT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_financial_summary',
+      description: 'Get ACTUAL financial figures (total sales, returns, net sales, cost of goods, gross profit, profit margin) for a period. Use when the user asks for numbers like "كم بعت", "إجمالي البيع والربح والخسارة", "صافي الربح الشهر الماضي", "how much did I sell / profit". Returns real numbers, not a link.',
+      parameters: {
+        type: 'object',
+        properties: {
+          period: {
+            type: 'string',
+            description: 'Time window. One of: today, last_7_days, last_30_days, this_month, last_month, this_year. Map اليوم→today, آخر أسبوع→last_7_days, آخر 30 يوم→last_30_days, هذا الشهر→this_month, الشهر الماضي/آخر شهر→last_month, هذا العام→this_year. Default last_month.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'navigate_to_feature',
       description: 'Direct the user to a specific page or feature in the app. Call this for any "where do I find…", "how do I…", "open…", "take me to…", "I want to…" question about using the system — adding/managing products, cashier/POS, supplier orders, purchase invoices/returns, reorder wishlist, AI center, P2P marketplace, supplier connections, catalog, price intelligence, customers, settings, data migration, onboarding. Returns a button that navigates there.',
       parameters: {
@@ -320,6 +336,10 @@ const TOOL_ACTIONS: Record<string, ChatActionButton[]> = {
     { label: 'عرض المخزون',                    route: '/pharmacy/inventory' },
     { label: 'مركز الذكاء الاصطناعي',          route: '/pharmacy/ai-center' },
   ],
+  get_financial_summary: [
+    { label: 'تقرير الأرباح والخسائر',         route: '/pharmacy/reports/profit-loss' },
+    { label: 'ملخص المبيعات',                route: '/pharmacy/reports/sales-summary' },
+  ],
   search_inventory: [
     { label: 'عرض في المخزون',                 route: '/pharmacy/inventory' },
   ],
@@ -344,6 +364,7 @@ const FOLLOW_UPS: Record<string, string[]> = {
   get_seasonal_outlook:     ['ما المنتجات منخفضة المخزون من هذه الفئات؟', 'أعطني موجزاً سريعاً عن صيدليتي', 'ما حالة طلبات الشراء المعلّقة؟'],
   get_business_brief:       ['ما المنتجات منخفضة المخزون؟', 'ما الأصناف قرب انتهاء الصلاحية؟', 'ما الموسم القادم وماذا أجهّز له؟'],
   get_demand_forecast:      ['كم علبة يجب أن أطلب؟ ومن أرخص مورد؟', 'ما الموسم القادم وماذا أجهّز له؟', 'ما المنتجات منخفضة المخزون؟'],
+  get_financial_summary:    ['ما ربحية كل منتج؟', 'كيف كان أداء الشهر السابق؟', 'ما الأصناف الأكثر ربحاً؟'],
   general_reply:            ['أعطني موجزاً سريعاً عن صيدليتي', 'ما المنتجات منخفضة المخزون؟', 'ما الموسم القادم وماذا أجهّز له؟'],
 };
 
@@ -805,6 +826,8 @@ export class ChatService {
         return this.toolBusinessBrief(tenantId);
       case 'get_demand_forecast':
         return this.toolDemandForecast(tenantId, String(args.product ?? ''));
+      case 'get_financial_summary':
+        return this.toolFinancialSummary(tenantId, String(args.period ?? 'last_month'));
       default:
         return { toolResult: { note: 'unknown tool' }, cards: [] };
     }
@@ -833,7 +856,101 @@ export class ChatService {
     };
   }
 
-  // ── Tool: Seasonal outlook (Hijri-calendar, no DB) ────────────────────────
+  // ── Tool: Real financial figures for a period (sales / profit / loss) ─────
+  // Read-only, tenant-scoped. Gives the actual numbers the user asks for
+  // instead of only a link, using completed POS transactions + COGS.
+  private async toolFinancialSummary(tenantId: string, period: string) {
+    const now = new Date();
+    let start: Date;
+    let endExclusive: Date = now;
+    let labelAr: string;
+
+    const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    switch (period) {
+      case 'today':
+        start = startOfDay(now); labelAr = 'اليوم'; break;
+      case 'last_7_days':
+        start = new Date(now.getTime() - 7 * 86400000); labelAr = 'آخر 7 أيام'; break;
+      case 'last_30_days':
+        start = new Date(now.getTime() - 30 * 86400000); labelAr = 'آخر 30 يوم'; break;
+      case 'this_month':
+        start = new Date(now.getFullYear(), now.getMonth(), 1); labelAr = 'هذا الشهر'; break;
+      case 'this_year':
+        start = new Date(now.getFullYear(), 0, 1); labelAr = 'هذا العام'; break;
+      case 'last_month':
+      default:
+        start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        endExclusive = new Date(now.getFullYear(), now.getMonth(), 1);
+        labelAr = 'الشهر الماضي';
+        break;
+    }
+
+    const rows = await this.dataSource.query<{
+      total_sales: string; total_returns: string; cogs: string; invoice_count: string;
+    }[]>(`
+      WITH filtered_tx AS (
+        SELECT id, type, "totalAmount"
+        FROM pos_transactions
+        WHERE "pharmacyTenantId" = $1
+          AND status = 'completed'
+          AND "createdAt" >= $2
+          AND "createdAt" <  $3
+      ),
+      tx_cogs AS (
+        SELECT ti."transactionId",
+               SUM(ti.quantity * COALESCE(i."costPrice", 0)) AS cogs
+        FROM pos_transaction_items ti
+        JOIN filtered_tx f ON f.id = ti."transactionId"
+        LEFT JOIN inventory_items i ON i.id = ti."inventoryItemId"
+        GROUP BY ti."transactionId"
+      )
+      SELECT
+        COALESCE(SUM(CASE WHEN f.type = 'sale'   THEN f."totalAmount" ELSE 0 END), 0)::text AS total_sales,
+        COALESCE(SUM(CASE WHEN f.type = 'return' THEN f."totalAmount" ELSE 0 END), 0)::text AS total_returns,
+        COALESCE(SUM(CASE WHEN f.type = 'sale'   THEN COALESCE(c.cogs, 0) ELSE 0 END), 0)::text AS cogs,
+        COUNT(CASE WHEN f.type = 'sale' THEN 1 END)::text AS invoice_count
+      FROM filtered_tx f
+      LEFT JOIN tx_cogs c ON c."transactionId" = f.id
+    `, [tenantId, start.toISOString(), endExclusive.toISOString()]);
+
+    const r            = rows[0] ?? { total_sales: '0', total_returns: '0', cogs: '0', invoice_count: '0' };
+    const totalSales   = Number(r.total_sales) || 0;
+    const totalReturns = Number(r.total_returns) || 0;
+    const cogs         = Number(r.cogs) || 0;
+    const invoiceCount = Number(r.invoice_count) || 0;
+    const netSales     = totalSales - totalReturns;
+    const grossProfit  = netSales - cogs;
+    const marginPct    = netSales > 0 ? Math.round((grossProfit / netSales) * 1000) / 10 : 0;
+
+    const cards: ResponseCard[] = [
+      {
+        type: 'kpi_row',
+        items: [
+          { label: `إجمالي البيع (${labelAr})`, value: fmtEgp(totalSales), color: 'emerald' },
+          { label: 'المرتجعات',                  value: fmtEgp(totalReturns), color: totalReturns > 0 ? 'amber' : 'emerald' },
+          { label: 'صافي البيع',                 value: fmtEgp(netSales), color: 'emerald' },
+        ],
+      },
+      {
+        type: 'kpi_row',
+        items: [
+          { label: 'تكلفة البضاعة المباعة', value: fmtEgp(cogs), color: 'amber' },
+          { label: grossProfit >= 0 ? 'صافي الربح' : 'صافي الخسارة', value: fmtEgp(grossProfit), color: grossProfit >= 0 ? 'emerald' : 'red' },
+          { label: 'هامش الربح', value: `${marginPct}%`, color: marginPct >= 0 ? 'emerald' : 'red' },
+        ],
+      },
+    ];
+
+    return {
+      toolResult: {
+        period, labelAr, totalSales, totalReturns, netSales, cogs, grossProfit, marginPct, invoiceCount,
+        note: invoiceCount === 0 ? 'no_sales_in_period' : undefined,
+      },
+      cards,
+    };
+  }
+
+
   private toolSeasonalOutlook(): { toolResult: unknown; cards: ResponseCard[]; actions: ChatActionButton[] } {
     const CATEGORY_AR: Record<string, string> = {
       antibiotic: 'مضادات حيوية', antidiarrheal: 'مضادات الإسهال', analgesic: 'مسكّنات',

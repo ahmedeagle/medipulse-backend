@@ -1194,24 +1194,24 @@ export class ChatService {
              p2p.p2p_price::text, p2p.p2p_qty::text
       FROM (
         SELECT i."productId" AS product_id,
-               p.name, p."nameAr" AS name_ar,
-               i.quantity AS qty,
-               GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0))::int AS trigger,
+               MAX(p.name)        AS name,
+               MAX(p."nameAr")    AS name_ar,
+               SUM(i.quantity)::int AS qty,
+               GREATEST(MAX(i."minThreshold"), COALESCE(CEIL(MAX(s."reorderPoint")), 0))::int AS trigger,
                CASE
-                 WHEN s."eoqQty" IS NOT NULL AND s."eoqQty" > 0 THEN CEIL(s."eoqQty")::int
+                 WHEN MAX(s."eoqQty") IS NOT NULL AND MAX(s."eoqQty") > 0 THEN CEIL(MAX(s."eoqQty"))::int
                  ELSE GREATEST(1,
-                        GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0))::int - i.quantity)
-                      + CEIL(GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0)) * 0.5)::int
+                        GREATEST(MAX(i."minThreshold"), COALESCE(CEIL(MAX(s."reorderPoint")), 0))::int - SUM(i.quantity)::int)
+                      + CEIL(GREATEST(MAX(i."minThreshold"), COALESCE(CEIL(MAX(s."reorderPoint")), 0)) * 0.5)::int
                END AS suggested_qty
         FROM inventory_items i
         JOIN products p ON p.id = i."productId"
         LEFT JOIN procurement_schedules s ON s."productId" = i."productId" AND s."tenantId" = $1
         WHERE i."pharmacyTenantId" = $1 AND i."deletedAt" IS NULL
-          AND (
-            ($2::text IS NOT NULL AND (p.name ILIKE $2 OR p."nameAr" ILIKE $2))
-            OR
-            ($2::text IS NULL AND i.quantity <= GREATEST(i."minThreshold", COALESCE(CEIL(s."reorderPoint"), 0)))
-          )
+          AND ($2::text IS NULL OR p.name ILIKE $2 OR p."nameAr" ILIKE $2)
+        GROUP BY i."productId"
+        HAVING $2::text IS NOT NULL
+            OR SUM(i.quantity) <= GREATEST(MAX(i."minThreshold"), COALESCE(CEIL(MAX(s."reorderPoint")), 0))
       ) tg
       LEFT JOIN LATERAL (
         SELECT t.name AS supplier_name, sc.price AS supplier_price
@@ -1273,7 +1273,7 @@ export class ChatService {
         qty: `${i.suggestedQty} وحدة`,
         supplier: i.supplierName
           ? `${i.supplierName} — ${fmtEgp(i.supplierPrice as number)}`
-          : '—',
+          : 'لا يوجد مورد مسجّل',
         p2p: i.p2pPrice != null
           ? `${fmtEgp(i.p2pPrice)} (${i.p2pQty} متاح)`
           : '—',

@@ -585,6 +585,23 @@ export class ChatService {
       return this.finalize(tenantId, userId, dto.conversationId, question, { ...cached }, null);
     }
 
+    // Resolved-question shortcut: if this tenant previously asked something the
+    // AI couldn't answer, and the GX1 team has since RESOLVED it with a written
+    // answer, serve that answer instantly — no LLM, no tokens. This delivers the
+    // "next time you'll get a direct answer" promise shown on the training bubble.
+    const resolved = await this.findResolvedAnswer(tenantId, question);
+    if (resolved) {
+      const answer: ChatAnswer = {
+        type: 'answer',
+        text: resolved.resolution,
+        cards: [],
+        actions: [{ label: 'مركز الذكاء الاصطناعي', route: '/pharmacy/ai-center' }],
+      };
+      this.auditLog({ tenantId, qHash: hashQ(question), tool: 'resolved_answer', latencyMs: 0 });
+      await this.answerCache.set(tenantId, question, answer);
+      return this.finalize(tenantId, userId, dto.conversationId, question, answer, 'resolved_answer');
+    }
+
     // Per-tenant chat budget — independent of procurement budget so a
     // runaway chat loop cannot starve the recommendation engine.
     if (!(await this.tokenBudget.hasBudget(tenantId, 'chat'))) {
@@ -1435,20 +1452,48 @@ export class ChatService {
   }
 
   // ── Tool 1: Inventory KPI ─────────────────────────────────────────────────
+  /**
+   * Look up a previously-resolved training answer for this tenant. When the GX1
+   * team resolves a feature request with a written answer, the same question
+   * (normalised) is answered instantly next time — no LLM, no tokens.
+   */
+  private async findResolvedAnswer(
+    tenantId: string,
+    question: string,
+  ): Promise<{ resolution: string; trackingNumber: string } | null> {
+    const rows = await this.dataSource.query<{ resolution: string; tracking: string }[]>(
+      `SELECT resolution, "trackingNumber" AS tracking
+       FROM feature_requests
+       WHERE "tenantId" = $1
+         AND status = 'resolved'
+         AND resolution IS NOT NULL
+         AND LENGTH(TRIM(resolution)) > 0
+         AND LOWER(TRIM(question)) = LOWER(TRIM($2))
+       ORDER BY "resolvedAt" DESC NULLS LAST
+       LIMIT 1`,
+      [tenantId, question],
+    ).catch(() => [] as { resolution: string; tracking: string }[]);
+    if (!rows.length) return null;
+    return { resolution: rows[0].resolution, trackingNumber: rows[0].tracking };
+  }
+
   private async toolInventoryKpi(tenantId: string) {    const [s, totalRows] = await Promise.all([
       this.dashboard.summary(tenantId),
-      this.dataSource.query<{ total: string }[]>(
-        `SELECT COUNT(DISTINCT "productId")::text AS total
+      this.dataSource.query<{ products: string; items: string }[]>(
+        `SELECT COUNT(DISTINCT "productId")::text                          AS products,
+                COUNT(*) FILTER (WHERE quantity > 0)::text                 AS items
          FROM inventory_items
          WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL`,
         [tenantId],
       ),
     ]);
-    const totalProducts = Number(totalRows[0]?.total ?? 0);
+    const totalProducts = Number(totalRows[0]?.products ?? 0);
+    const totalItems = Number(totalRows[0]?.items ?? 0);
     const w = Object.fromEntries(s.widgets.map((w) => [w.key, w.count]));
     const toolResult = {
       ...Object.fromEntries(s.widgets.map((w) => [w.key, { count: w.count, label: w.titleAr }])),
       totalProducts,
+      totalItems,
       expiryRiskEgp:     s.expiryRiskEgp,
       pendingApprovals:  s.pendingApprovals.total,
       criticalApprovals: s.pendingApprovals.critical,
@@ -1457,6 +1502,7 @@ export class ChatService {
       type: 'kpi_row',
       items: [
         { label: 'إجمالي المنتجات', value: String(totalProducts),                    color: 'blue' },
+        { label: 'أصناف في المخزن', value: String(totalItems),                       color: 'blue' },
         { label: 'مخزون منخفض',    value: String(w['stock_risk'] ?? 0),             color: (w['stock_risk'] ?? 0) > 0 ? 'amber' : 'emerald' },
         { label: 'قيمة في خطر',    value: fmtEgp(s.expiryRiskEgp ?? 0),            color: (s.expiryRiskEgp ?? 0) > 0 ? 'red' : 'emerald' },
         { label: 'مهام معلقة',     value: String(s.pendingApprovals?.total ?? 0),   color: (s.pendingApprovals?.total ?? 0) > 0 ? 'amber' : 'emerald' },

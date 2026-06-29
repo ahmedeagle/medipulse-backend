@@ -121,14 +121,17 @@ export class FeatureRequestsService {
     if (req.status !== 'in_progress' && req.status !== 'resolved') return;
 
     const isResolved = req.status === 'resolved';
+    const answerText = (req.resolution ?? '').trim();
     try {
       await this.notifications.create({
         tenantId:    req.tenantId,
         userId:      req.submittedByUserId ?? undefined,
         type:        'feature_request_update',
-        title:       isResolved ? 'تم تهيئة الميزة المطلوبة 🎉' : 'طلبك قيد المراجعة',
+        title:       isResolved ? 'إجابة سؤالك جاهزة 🎉' : 'طلبك قيد المراجعة',
         body:        isResolved
-          ? `طلبك ${req.trackingNumber} تمت تهيئته — يمكنك الآن تجربة السؤال في المساعد الذكي`
+          ? (answerText
+              ? `${answerText.slice(0, 180)}${answerText.length > 180 ? '…' : ''} — اسأل المساعد الذكي نفس السؤال لتحصل على الإجابة الكاملة فوراً`
+              : `طلبك ${req.trackingNumber} تمت تهيئته — يمكنك الآن تجربة السؤال في المساعد الذكي`)
           : `طلبك ${req.trackingNumber} قيد المراجعة من فريق GX1`,
         resourceRef: `feature-request:${req.id}`,
       });

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SalesHistoryUpload } from './entities/sales-history-upload.entity';
@@ -14,6 +14,10 @@ export interface IncomingFile {
 @Injectable()
 export class SalesHistoryService {
   private readonly logger = new Logger(SalesHistoryService.name);
+
+  /** Cap on pending (not-yet-processed) uploads per tenant — guards against
+   *  unbounded storage growth / upload-spam DoS. Ops clears these as processed. */
+  private static readonly MAX_PENDING_PER_TENANT = 50;
 
   constructor(
     @InjectRepository(SalesHistoryUpload)
@@ -32,6 +36,14 @@ export class SalesHistoryService {
     kind = 'unspecified',
     note: string | null = null,
   ): Promise<{ uploaded: number; ids: string[] }> {
+    // Guard: don't let a tenant accumulate an unbounded backlog of pending files.
+    const pending = await this.repo.count({ where: { tenantId, status: 'pending' } });
+    if (pending + files.length > SalesHistoryService.MAX_PENDING_PER_TENANT) {
+      throw new BadRequestException(
+        `لديك ${pending} ملف بانتظار المعالجة. الحد الأقصى ${SalesHistoryService.MAX_PENDING_PER_TENANT} ملف. انتظر معالجة فريق العمليات للملفات الحالية قبل رفع المزيد.`,
+      );
+    }
+
     const rows = files.map((f) =>
       this.repo.create({
         tenantId,

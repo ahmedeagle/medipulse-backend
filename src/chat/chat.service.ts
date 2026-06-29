@@ -176,6 +176,7 @@ const CHAT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: 'object',
         properties: {
           limit: { type: 'number', description: 'Max shifts to return — default 5' },
+          days:  { type: 'number', description: 'How many days back to scan — default 30. If the user mentions an old shift / منذ فترة / قديم / من شهور, pass a larger window (e.g. 90, 180, 365).' },
         },
       },
     },
@@ -795,7 +796,7 @@ export class ChatService {
       case 'get_p2p_order_issues':
         return this.toolP2pOrderIssues(tenantId, safeInt(args.limit, 5));
       case 'get_pos_shift_issues':
-        return this.toolPosShiftIssues(tenantId, safeInt(args.limit, 5));
+        return this.toolPosShiftIssues(tenantId, safeInt(args.limit, 5), safeInt(args.days, 30));
       case 'search_inventory':
         return this.toolSearchInventory(tenantId, String(args.query ?? ''));
       case 'get_seasonal_outlook':
@@ -1379,7 +1380,10 @@ export class ChatService {
   }
 
   // ── Tool 8: POS shift issues ─────────────────────────────────────────────
-  private async toolPosShiftIssues(tenantId: string, limit: number) {
+  private async toolPosShiftIssues(tenantId: string, limit: number, days = 30) {
+    // Clamp the lookback window: default 30d, but allow scanning much further
+    // back (up to ~2y) when the user asks about an old shift ("قديم منذ فترة").
+    const windowDays = Math.min(Math.max(days, 1), 730);
     const rows = await this.dataSource.query<{
       id: string;
       cashier_name: string | null;
@@ -1405,7 +1409,7 @@ export class ChatService {
       WHERE s."pharmacyTenantId" = $1
         AND s.status = 'closed'
         AND s."closingBalance" IS NOT NULL
-        AND s."closedAt" > NOW() - INTERVAL '7 days'
+        AND s."closedAt" > NOW() - ($3 || ' days')::interval
         AND s."totalSales" >= 50
         AND ABS(s."closingBalance" - (s."openingBalance" + s."totalCashIn" - s."totalCashOut" + s."totalCashSales")) >= 10
 
@@ -1424,17 +1428,17 @@ export class ChatService {
       FROM pos_shifts s
       WHERE s."pharmacyTenantId" = $1
         AND s.status = 'closed'
-        AND s."closedAt" > NOW() - INTERVAL '7 days'
+        AND s."closedAt" > NOW() - ($3 || ' days')::interval
         AND s."totalSales" >= 50
         AND s."totalReturns" / NULLIF(s."totalSales", 0) >= 0.15
 
       ORDER BY variance DESC NULLS LAST
       LIMIT $2
-    `, [tenantId, limit]);
+    `, [tenantId, limit, windowDays]);
 
     if (!rows.length) {
       return {
-        toolResult: { count: 0, message: 'لا توجد مشكلات في شفتات الـ 7 أيام الماضية — كل شيء يسير بشكل طبيعي ✓' },
+        toolResult: { count: 0, windowDays, message: `لا توجد مشكلات في شفتات آخر ${windowDays} يوم — كل شيء يسير بشكل طبيعي ✓` },
         cards: [],
       };
     }
@@ -1456,7 +1460,7 @@ export class ChatService {
 
     const cards: ResponseCard[] = [{
       type: 'table',
-      title: 'مشكلات شفتات الكاشير (آخر 7 أيام)',
+      title: `مشكلات شفتات الكاشير (آخر ${windowDays} يوم)`,
       columns: [
         { key: 'cashier',  header: 'الكاشير' },
         { key: 'issue',    header: 'المشكلة' },

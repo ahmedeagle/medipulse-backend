@@ -1,4 +1,4 @@
-import { IsIn, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class AskChatDto {
   @IsString()
@@ -7,6 +7,11 @@ export class AskChatDto {
   @MinLength(2)
   @MaxLength(500)
   question: string;
+
+  /** Optional thread to continue; when omitted a new conversation is created. */
+  @IsOptional()
+  @IsUUID()
+  conversationId?: string;
 }
 
 export class ChatExecuteDto {
@@ -34,6 +39,12 @@ export type ResponseCard =
       type: 'action_confirmed';
       message: string;
       route?: string;
+    }
+  | {
+      /** Compact labelled bar list — friendly, non-technical at-a-glance view. */
+      type: 'bars';
+      title?: string;
+      items: Array<{ label: string; value: string; pct: number; color: ResponseCardColor }>;
     };
 
 // ── Chat action buttons ───────────────────────────────────────────────────────
@@ -61,6 +72,26 @@ export interface ChatAnswer {
   question?: string;
   message?: string;
   actions?: ChatActionButton[];
+  /** The conversation this answer belongs to (created on first turn). */
+  conversationId?: string;
+  /** Up to 3 smart follow-up questions tailored to the answer. */
+  followUps?: string[];
+}
+
+export interface ChatConversationSummary {
+  id: string;
+  title: string;
+  messageCount: number;
+  updatedAt: string;
+}
+
+export interface ChatHistoryMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  cards?: ResponseCard[];
+  actions?: ChatActionButton[];
+  createdAt: string;
 }
 
 export interface ChatExecuteResult {

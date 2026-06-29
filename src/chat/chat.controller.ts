@@ -1,7 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
+  Get,
   HttpCode,
+  Param,
+  ParseUUIDPipe,
   Post,
   UnauthorizedException,
   UseGuards,
@@ -30,7 +34,7 @@ export class ChatController {
   @Throttle({ default: { limit: 15, ttl: 60_000 } })
   @ApiOperation({ summary: 'Ask the AI assistant a natural-language question about your pharmacy' })
   ask(
-    @CurrentUser() user: { tenantId: string | null; role: Role },
+    @CurrentUser() user: { tenantId: string | null; sub?: string; role: Role },
     @Body() dto: AskChatDto,
   ) {
     if (!user.tenantId) {
@@ -38,7 +42,37 @@ export class ChatController {
         'tenantId claim missing from token — ensure Keycloak protocol mapper is configured',
       );
     }
-    return this.chatService.ask(user.tenantId, dto);
+    return this.chatService.ask(user.tenantId, dto, user.sub ?? null);
+  }
+
+  @Get('conversations')
+  @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @ApiOperation({ summary: 'List recent assistant conversations (history drawer)' })
+  listConversations(@CurrentUser() user: { tenantId: string | null; sub?: string }) {
+    if (!user.tenantId) throw new UnauthorizedException('tenantId claim missing from token');
+    return this.chatService.listConversations(user.tenantId, user.sub ?? null);
+  }
+
+  @Get('conversations/:id')
+  @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @ApiOperation({ summary: 'Get the full message history of one conversation' })
+  getConversation(
+    @CurrentUser() user: { tenantId: string | null },
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    if (!user.tenantId) throw new UnauthorizedException('tenantId claim missing from token');
+    return this.chatService.getConversation(user.tenantId, id);
+  }
+
+  @Delete('conversations/:id')
+  @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @ApiOperation({ summary: 'Delete a conversation and its messages' })
+  deleteConversation(
+    @CurrentUser() user: { tenantId: string | null },
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    if (!user.tenantId) throw new UnauthorizedException('tenantId claim missing from token');
+    return this.chatService.deleteConversation(user.tenantId, id);
   }
 
   @Post('execute')

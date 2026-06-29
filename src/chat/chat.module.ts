@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { InventoryItem }    from '../inventory/entities/inventory-item.entity';
 import { Approval }         from '../ai-governance/entities/approval.entity';
 import { PriceSnapshot }    from '../analytics/entities/price-snapshot.entity';
+import { ChatConversation } from './entities/chat-conversation.entity';
+import { ChatMessage }      from './entities/chat-message.entity';
 import { DashboardService } from '../ai-governance/dashboard.service';
 import { DeadStockService } from '../inventory/dead-stock.service';
 import { AiTokenBudget }    from '../ai/governance/token-budget';
@@ -14,7 +16,7 @@ import { ChatController }   from './chat.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([InventoryItem, Approval, PriceSnapshot]),
+    TypeOrmModule.forFeature([InventoryItem, Approval, PriceSnapshot, ChatConversation, ChatMessage]),
     RedisModule,
   ],
   providers:   [ChatService, DashboardService, DeadStockService, AiTokenBudget, ChatAnswerCache],

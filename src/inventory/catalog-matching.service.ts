@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, Brackets } from 'typeorm';
 import { Product } from './entities/product.entity';
 import { InventoryItem } from './entities/inventory-item.entity';
+import { CatalogEmbeddingsService } from './catalog-embeddings.service';
 
 /**
  * A scored catalog candidate produced by the matching engine.
@@ -87,6 +88,7 @@ export class CatalogMatchingService {
   constructor(
     @InjectRepository(Product)       private readonly productRepo:   Repository<Product>,
     @InjectRepository(InventoryItem) private readonly inventoryRepo: Repository<InventoryItem>,
+    private readonly embeddings:     CatalogEmbeddingsService,
   ) {}
 
   /**
@@ -241,6 +243,14 @@ export class CatalogMatchingService {
       .filter(c => c.score >= 35)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+
+    // OPTIONAL embeddings assist (feature-flagged OFF by default). It may only
+    // re-order/annotate — candidate `score` values stay untouched, so all
+    // auto-link / needs-review thresholds applied by callers are unchanged.
+    // Any failure returns `scored` as-is (no-op), never breaking lexical match.
+    if (this.embeddings.isEnabled() && scored.length >= 2) {
+      return this.embeddings.reRank(profile, scored);
+    }
 
     return scored;
   }

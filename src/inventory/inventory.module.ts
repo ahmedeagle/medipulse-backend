@@ -11,6 +11,7 @@ import { BatchesService } from './batches.service';
 import { ProductRecallService } from './product-recall.service';
 import { ProductRecallController } from './product-recall.controller';
 import { CatalogMatchingService } from './catalog-matching.service';
+import { CatalogEmbeddingsService } from './catalog-embeddings.service';
 import { ImportBatchService } from './import-batch.service';
 import { CatalogApprovalExecutor } from './catalog-approval.executor';
 import { ExpiredInventoryCron } from './expired-inventory.cron';
@@ -44,7 +45,7 @@ import { MATCH_QUEUE } from './match.constants';
     PharmacySettingsModule,
   ],
   controllers: [InventoryController, ProductRecallController],
-  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron, LostRevenueCron],
+  providers: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, CatalogEmbeddingsService, ImportBatchService, CatalogApprovalExecutor, ExpiredInventoryCron, LowStockCron, LostRevenueCron],
   exports: [InventoryService, ConsumptionAnalyticsService, InventoryImportService, BarcodeLookupService, BatchesService, ProductRecallService, CatalogMatchingService, ImportBatchService, TypeOrmModule],
 })
 export class InventoryModule {}

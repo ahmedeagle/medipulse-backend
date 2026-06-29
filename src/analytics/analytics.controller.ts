@@ -49,6 +49,21 @@ export class AnalyticsController {
     return this.svc.getWeeklySnapshots(user.tenantId, Math.min(weeks, 52));
   }
 
+  @Get('dashboard-overview')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Roles(Role.PHARMACY_ADMIN)
+  @AuditRead('analytics_dashboard_overview')
+  @ApiOperation({ summary: 'Aggregate home-dashboard feed: AI impact, drafts, sales, counts, forecast risk' })
+  @ApiQuery({ name: 'period', required: false, enum: ['month', 'week', 'year'], schema: { default: 'month' } })
+  @ApiOkResponse({ description: 'Dashboard overview object' })
+  getDashboardOverview(
+    @CurrentUser() user: any,
+    @Query('period') period?: string,
+  ) {
+    const p = period === 'week' ? 'week' : period === 'year' ? 'year' : 'month';
+    return this.svc.getDashboardOverview(user.tenantId, p);
+  }
+
   @Get('diag')
   @Roles(Role.PHARMACY_ADMIN)
   @ApiOperation({ summary: 'Diagnostic: counts from all report-relevant tables' })

@@ -215,11 +215,13 @@ export class FinancialService {
             AND i.quantity > 0
             AND i."deletedAt" IS NULL
             AND NOT EXISTS (
-              SELECT 1 FROM sale_items si
-              JOIN sales s ON s.id = si."saleId"
-              WHERE si."productId" = i."productId"
-                AND s."tenantId"   = i."tenantId"
-                AND s."createdAt"  >= $2
+              SELECT 1 FROM pos_transaction_items ti
+              JOIN pos_transactions tx ON tx.id = ti."transactionId"
+              WHERE ti."productId"        = i."productId"
+                AND tx."pharmacyTenantId" = i."tenantId"
+                AND tx.status             = 'completed'
+                AND tx.type               = 'sale'
+                AND tx."createdAt"        >= $2
             )
           `,
           [tenantId, ninetyDaysAgo],

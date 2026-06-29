@@ -19,6 +19,14 @@ export interface MarketIntelligence {
     totalVolume: number;
   }>;
   cityDensity: Array<{ city: string; sellerCount: number }>;
+  resolvedCity: string | null;
+  topProductsInCity: Array<{
+    productId: string;
+    productName: string | null;
+    productNameAr: string | null;
+    unitsSold: number;
+    pharmacyCount: number;
+  }>;
   generatedAt: string;
 }
 
@@ -111,6 +119,44 @@ export class P2pMarketIntelligenceService {
       `, [pharmacyTenantId]),
     ]);
 
+    // Resolve the caller's own city (when not explicitly filtered) so we can
+    // surface "best-selling in <my city>" on the dashboard. We use the `tenants`
+    // table because it holds a city for EVERY pharmacy, not only P2P sellers.
+    const cityRow = city
+      ? null
+      : await this.dataSource.query<Array<{ city: string }>>(
+          `SELECT city FROM tenants
+            WHERE id = $1 AND city IS NOT NULL
+            LIMIT 1`,
+          [pharmacyTenantId],
+        );
+    const effectiveCity: string | null = city ?? cityRow?.[0]?.city ?? null;
+
+    // Best-selling products within that city, derived from REAL retail sales:
+    // completed POS sales across every pharmacy whose tenant city matches,
+    // over the last 30 days. No P2P/guessing — this is actual units sold.
+    const inCityProducts: any[] = effectiveCity
+      ? await this.dataSource.query<any[]>(`
+          SELECT
+            ti."productId",
+            COALESCE(p."name", MAX(ti."productName"))   AS "productName",
+            p."nameAr"                                  AS "productNameAr",
+            SUM(ti."quantity")::int                     AS "unitsSold",
+            COUNT(DISTINCT tx."pharmacyTenantId")::int  AS "pharmacyCount"
+          FROM pos_transaction_items ti
+          INNER JOIN pos_transactions tx ON tx.id = ti."transactionId"
+          INNER JOIN tenants t           ON t.id = tx."pharmacyTenantId"
+          LEFT  JOIN products p          ON p.id = ti."productId"
+          WHERE tx.status = 'completed'
+            AND tx.type = 'sale'
+            AND tx."createdAt" >= now() - INTERVAL '30 days'
+            AND t.city ILIKE $1
+          GROUP BY ti."productId", p."name", p."nameAr"
+          ORDER BY SUM(ti."quantity") DESC
+          LIMIT 10
+        `, [`%${effectiveCity}%`])
+      : [];
+
     return {
       activeSellersCount: parseInt(summary?.sellers ?? '0', 10),
       activeListingsCount: parseInt(summary?.listings ?? '0', 10),
@@ -131,6 +177,14 @@ export class P2pMarketIntelligenceService {
       cityDensity: cityDensity.map((r) => ({
         city: r.city,
         sellerCount: Number(r.sellerCount),
+      })),
+      resolvedCity: effectiveCity,
+      topProductsInCity: inCityProducts.map((r) => ({
+        productId: r.productId,
+        productName: r.productName ?? null,
+        productNameAr: r.productNameAr ?? null,
+        unitsSold: Number(r.unitsSold),
+        pharmacyCount: Number(r.pharmacyCount),
       })),
       generatedAt: new Date().toISOString(),
     };

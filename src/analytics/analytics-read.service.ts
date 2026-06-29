@@ -166,6 +166,48 @@ export interface RegionalPrice {
   priceChange30d:    number | null;  // % change vs 30 days ago
 }
 
+export interface DashboardOverview {
+  period: 'month' | 'week' | 'year';
+  aiImpact: {
+    savingsThisPeriodEgp:      number;
+    actionsExecutedThisPeriod: number;
+    pendingApprovals:          number;
+  };
+  aiDrafts: {
+    count:               number;
+    totalValueEgp:       number;
+    potentialSavingsEgp: number;
+    soonestExpiresAt:    string | null;
+  };
+  sales: {
+    totalSales:    number;
+    netProfit:     number;
+    invoiceCount:  number;
+    customerCount: number;
+    deltaPct:      number | null;  // vs previous equal period; null when no baseline
+  };
+  counts: {
+    products:      number;
+    lowStock:      number;
+    pendingOrders: number;
+  };
+  forecastRisk: {
+    atRiskCount: number;
+    items: Array<{
+      productId:               string;
+      productName:             string | null;
+      daysUntilReorderNeeded:  number | null;
+      predictedStockoutDate:   string | null;
+    }>;
+  };
+  topProducts: Array<{
+    productId:    string;
+    productName:  string | null;
+    qtySold:      number;
+    revenue:      number;
+  }>;
+}
+
 @Injectable()
 export class AnalyticsReadService {
   private readonly logger = new Logger(AnalyticsReadService.name);
@@ -183,6 +225,216 @@ export class AnalyticsReadService {
     private readonly snapshotRepo: Repository<WeeklyAnalyticsSnapshot>,
     private readonly dataSource: DataSource,
   ) {}
+
+  // ─── Pharmacy Dashboard Overview ─────────────────────────────────────────
+
+  /**
+   * Single aggregate feed for the pharmacy home dashboard. Cheap COUNT/SUM
+   * queries via raw SQL (no entity imports → no circular module deps).
+   * `period` controls the sales + AI-savings window (calendar month or ISO week).
+   */
+  async getDashboardOverview(
+    tenantId: string,
+    period: 'month' | 'week' | 'year' = 'month',
+  ): Promise<DashboardOverview> {
+    const unit = period === 'week' ? 'week' : period === 'year' ? 'year' : 'month';
+
+    const SAVINGS_EXPR = (col: string) => `COALESCE(
+      (${col}->'explainability'->'financialImpact'->>'savedVsHistoricalAvg')::numeric,
+      (${col}->'planSnapshot'->'explainability'->'financialImpact'->>'savedVsHistoricalAvg')::numeric,
+      (${col}->'planVerdicts'->'financialStatus'->>'savedVsHistoricalAvg')::numeric,
+      (${col}->'financialImpact'->>'savedVsHistoricalAvg')::numeric,
+      0)`;
+
+    const [aiRow, draftRow, salesRow, countRow, forecastRows, riskCountRow, topProductRows] =
+      await Promise.all([
+        // AI impact (approvals)
+        this.dataSource.query(
+          `SELECT
+             COALESCE(SUM(${SAVINGS_EXPR('payload')}) FILTER (
+               WHERE status IN ('approved','executed')
+                 AND "createdAt" >= date_trunc($2, now())
+             ), 0) AS savings,
+             COUNT(*) FILTER (
+               WHERE status IN ('approved','executed')
+                 AND "createdAt" >= date_trunc($2, now())
+             ) AS actions,
+             COUNT(*) FILTER (WHERE status = 'pending') AS pending
+           FROM approvals
+           WHERE "tenantId" = $1`,
+          [tenantId, unit],
+        ),
+        // AI-drafted purchase orders awaiting approval
+        this.dataSource.query(
+          `SELECT
+             COUNT(*) AS count,
+             COALESCE(SUM("suggestedQuantity" * "unitPrice"), 0) AS total_value,
+             COALESCE(SUM(${SAVINGS_EXPR('"planSnapshot"')}), 0) AS potential_savings,
+             MIN("expiresAt") AS soonest_expires
+           FROM procurement_drafts
+           WHERE "pharmacyTenantId" = $1
+             AND status = 'pending_review'
+             AND "sourceType" = 'ai_plan'`,
+          [tenantId],
+        ),
+        // POS sales — current period vs previous equal period.
+        // COGS is pre-aggregated once over the date-bounded transactions
+        // (CTE join) instead of a per-row correlated subquery — scales to
+        // large transaction volumes without N sub-selects.
+        this.dataSource.query(
+          `WITH bounds AS (
+             SELECT date_trunc($2, now()) AS cur_start,
+                    date_trunc($2, now()) - ('1 ' || $2)::interval AS prev_start
+           ),
+           tx AS (
+             SELECT t.id, t."totalAmount", t."customerId", t."createdAt"
+             FROM pos_transactions t, bounds b
+             WHERE t."pharmacyTenantId" = $1
+               AND t.status = 'completed'
+               AND t.type = 'sale'
+               AND t."createdAt" >= b.prev_start
+           ),
+           tx_cogs AS (
+             SELECT ti."transactionId" AS tid,
+                    SUM(ti.quantity * COALESCE(i."costPrice", 0)) AS cogs
+             FROM pos_transaction_items ti
+             JOIN tx ON tx.id = ti."transactionId"
+             LEFT JOIN inventory_items i ON i.id = ti."inventoryItemId"
+             GROUP BY ti."transactionId"
+           ),
+           sale_tx AS (
+             SELECT tx.id, tx."totalAmount", tx."customerId", tx."createdAt",
+                    COALESCE(c.cogs, 0) AS cogs
+             FROM tx
+             LEFT JOIN tx_cogs c ON c.tid = tx.id
+           )
+           SELECT
+             COALESCE(SUM(s."totalAmount") FILTER (WHERE s."createdAt" >= b.cur_start), 0)              AS cur_sales,
+             COALESCE(SUM(s."totalAmount" - s.cogs) FILTER (WHERE s."createdAt" >= b.cur_start), 0)     AS cur_profit,
+             COUNT(*) FILTER (WHERE s."createdAt" >= b.cur_start)                                       AS cur_invoices,
+             COUNT(DISTINCT s."customerId") FILTER (WHERE s."createdAt" >= b.cur_start)                 AS cur_customers,
+             COALESCE(SUM(s."totalAmount") FILTER (WHERE s."createdAt" < b.cur_start), 0)               AS prev_sales
+           FROM sale_tx s, bounds b
+           GROUP BY b.cur_start`,
+          [tenantId, unit],
+        ),
+        // Inventory counts
+        this.dataSource.query(
+          `SELECT
+             COUNT(*) AS products,
+             COUNT(*) FILTER (WHERE quantity < "minThreshold") AS low_stock
+           FROM inventory_items
+           WHERE "pharmacyTenantId" = $1 AND "deletedAt" IS NULL`,
+          [tenantId],
+        ),
+        // Forecast risk — soonest predicted stockouts (top 6)
+        this.dataSource.query(
+          `SELECT s."productId", p.name AS product_name,
+                  s."daysUntilReorderNeeded", s."predictedStockoutDate"
+             FROM procurement_schedules s
+             LEFT JOIN products p ON p.id = s."productId"
+            WHERE s."tenantId" = $1
+              AND s."daysUntilReorderNeeded" IS NOT NULL
+              AND s."daysUntilReorderNeeded" <= 7
+            ORDER BY s."daysUntilReorderNeeded" ASC
+            LIMIT 12`,
+          [tenantId],
+        ),
+        // Forecast risk — total at-risk count
+        this.dataSource.query(
+          `SELECT COUNT(*) AS at_risk
+             FROM procurement_schedules
+            WHERE "tenantId" = $1
+              AND "daysUntilReorderNeeded" IS NOT NULL
+              AND "daysUntilReorderNeeded" <= 7`,
+          [tenantId],
+        ),
+        // Best-selling products (this pharmacy, current period) by units sold
+        this.dataSource.query(
+          `SELECT ti."productId",
+                  COALESCE(p.name, ti."productName") AS product_name,
+                  SUM(ti.quantity)::int              AS qty_sold,
+                  ROUND(SUM(ti.subtotal)::numeric, 2) AS revenue
+             FROM pos_transaction_items ti
+             JOIN pos_transactions tx ON tx.id = ti."transactionId"
+             LEFT JOIN products p     ON p.id = ti."productId"
+            WHERE tx."pharmacyTenantId" = $1
+              AND tx.status = 'completed'
+              AND tx.type = 'sale'
+              AND tx."createdAt" >= date_trunc($2, now())
+            GROUP BY ti."productId", COALESCE(p.name, ti."productName")
+            ORDER BY SUM(ti.quantity) DESC
+            LIMIT 10`,
+          [tenantId, unit],
+        ),
+      ]);
+
+    // Pending orders count (separate — enum-typed status column)
+    const orderRow = await this.dataSource.query(
+      `SELECT COUNT(*) AS pending_orders
+         FROM orders
+        WHERE "pharmacyTenantId" = $1
+          AND status IN ('submitted','pending_approval','accepted','shipped','received_pending_qc')`,
+      [tenantId],
+    );
+
+    const ai     = aiRow?.[0]    ?? {};
+    const draft  = draftRow?.[0]  ?? {};
+    const sales  = salesRow?.[0]  ?? {};
+    const counts = countRow?.[0] ?? {};
+
+    const curSales  = Number(sales.cur_sales  ?? 0);
+    const prevSales = Number(sales.prev_sales ?? 0);
+    const deltaPct  = prevSales > 0
+      ? Math.round(((curSales - prevSales) / prevSales) * 1000) / 10
+      : null;
+
+    return {
+      period,
+      aiImpact: {
+        savingsThisPeriodEgp:      Math.round(Number(ai.savings ?? 0)),
+        actionsExecutedThisPeriod: Number(ai.actions ?? 0),
+        pendingApprovals:          Number(ai.pending ?? 0),
+      },
+      aiDrafts: {
+        count:               Number(draft.count ?? 0),
+        totalValueEgp:       Math.round(Number(draft.total_value ?? 0)),
+        potentialSavingsEgp: Math.round(Number(draft.potential_savings ?? 0)),
+        soonestExpiresAt:    draft.soonest_expires
+          ? new Date(draft.soonest_expires).toISOString()
+          : null,
+      },
+      sales: {
+        totalSales:    Math.round(curSales),
+        netProfit:     Math.round(Number(sales.cur_profit ?? 0)),
+        invoiceCount:  Number(sales.cur_invoices ?? 0),
+        customerCount: Number(sales.cur_customers ?? 0),
+        deltaPct,
+      },
+      counts: {
+        products:      Number(counts.products ?? 0),
+        lowStock:      Number(counts.low_stock ?? 0),
+        pendingOrders: Number(orderRow?.[0]?.pending_orders ?? 0),
+      },
+      forecastRisk: {
+        atRiskCount: Number(riskCountRow?.[0]?.at_risk ?? 0),
+        items: (forecastRows ?? []).map((r: any) => ({
+          productId:              r.productId,
+          productName:            r.product_name ?? null,
+          daysUntilReorderNeeded: r.daysUntilReorderNeeded == null ? null : Number(r.daysUntilReorderNeeded),
+          predictedStockoutDate:  r.predictedStockoutDate
+            ? new Date(r.predictedStockoutDate).toISOString()
+            : null,
+        })),
+      },
+      topProducts: (topProductRows ?? []).map((r: any) => ({
+        productId:   r.productId,
+        productName: r.product_name ?? null,
+        qtySold:     Number(r.qty_sold ?? 0),
+        revenue:     Math.round(Number(r.revenue ?? 0)),
+      })),
+    };
+  }
 
   // ─── Demand Signals (for suppliers) ──────────────────────────────────────
 

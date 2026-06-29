@@ -37,7 +37,7 @@ const SYSTEM_PROMPT = `أنت «المساعد التشغيلي» لـ MediPulse
 3. إجاباتك مختصرة وعملية: جملة افتتاحية + قائمة نقطية + توصية واحدة
 4. لا تذكر "قاعدة بيانات" أو "API" أو "أداة" — تحدث كمستشار خبير
 5. إذا سأل المستخدم "أين أجد..."، "كيف أفعل..."، "افتح لي..."، "خذني إلى..."، أو عن أي شاشة/ميزة في النظام → نادِ navigate_to_feature مع الوجهة المناسبة
-6. لأسئلة «كم بعت؟»، إجمالي البيع، الربح، الخسارة، صافي الربح، الهامش، أو أداء فترة (اليوم، هذا الشهر، الشهر الماضي، آخر أسبوع...) → نادِ get_financial_summary لإعطاء الأرقام مباشرة. أمّا للتفاصيل حسب المنتج/الفئة/المورد أو إنفاق المشتريات → نادِ link_report
+6. لأسئلة «كم بعت؟»، إجمالي البيع، الربح، الخسارة، صافي الربح، الهامش، أو أداء فترة (اليوم، هذا الشهر، الشهر الماضي، آخر أسبوع...) → نادِ get_financial_summary لإعطاء الأرقام مباشرة. اختر الفترة الصحيحة بدقة: «إجمالي مبيعاتي كلها/كل الوقت/من البداية»→all_time، «آخر 3 أشهر»→last_3_months، «هذا الشهر/الشهر ده»→this_month، «امبارح»→yesterday. إذا سأل المستخدم عن أكثر من فترة في رسالة واحدة (مثل «النهارده والأسبوع ده والشهر ده») فاستدعِ الأداة لكل فترة على حدة واعرض كل فترة بأرقامها — لا تخلط بينها ولا تستخدم رقم فترة واحدة لوصف الثلاثة. وإذا رجعت الأداة note فيها «no_sales_in_period_but_has_history» فاذكر للمستخدم بوضوح أن لا مبيعات في تلك الفترة لكن آخر بيعة وإجمالي مبيعاته من البداية كما في الـ note. أمّا للتفاصيل حسب المنتج/الفئة/المورد أو إنفاق المشتريات → نادِ link_report
 7. للتحيات (مرحبا، أهلاً، السلام عليكم)، الشكر، الأسئلة العامة مثل "ماذا تستطيع أن تفعل؟" أو "كيف تساعدني؟"، أو أي حديث ودّي أو سؤال إرشادي لا يحتاج بيانات حيّة → نادِ general_reply واكتب رداً ودوداً ومفيداً، واقترح وجهات مناسبة في suggest
 8. لأسئلة المواسم والمناسبات (رمضان، الحج، العودة للمدارس، "ماذا أجهّز للموسم القادم") → نادِ get_seasonal_outlook
 9. لأسئلة "كيف حال صيدليتي"، "ملخص سريع"، "موجز اليوم"، "أين أركّز اليوم" → نادِ get_business_brief
@@ -223,7 +223,7 @@ const CHAT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         properties: {
           period: {
             type: 'string',
-            description: 'Time window. One of: today, last_7_days, last_30_days, this_month, last_month, this_year. Map اليوم→today, آخر أسبوع→last_7_days, آخر 30 يوم→last_30_days, هذا الشهر→this_month, الشهر الماضي/آخر شهر→last_month, هذا العام→this_year. Default last_month.',
+            description: 'Time window. One of: today, yesterday, last_7_days, last_30_days, last_3_months, last_6_months, this_month, last_month, this_year, all_time. Map اليوم→today, امبارح/أمس→yesterday, آخر أسبوع/الأسبوع ده→last_7_days, آخر 30 يوم→last_30_days, آخر 3 أشهر/آخر ربع→last_3_months, آخر 6 أشهر→last_6_months, هذا الشهر/الشهر ده→this_month, الشهر الماضي/آخر شهر→last_month, هذا العام/السنة دي→this_year, إجمالي مبيعاتي كلها/كل الوقت/من البداية/المجموع الكلي→all_time. Default last_month.',
           },
         },
       },
@@ -970,14 +970,24 @@ export class ChatService {
     switch (period) {
       case 'today':
         start = startOfDay(now); labelAr = 'اليوم'; break;
+      case 'yesterday':
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        endExclusive = startOfDay(now); labelAr = 'أمس'; break;
       case 'last_7_days':
         start = new Date(now.getTime() - 7 * 86400000); labelAr = 'آخر 7 أيام'; break;
       case 'last_30_days':
         start = new Date(now.getTime() - 30 * 86400000); labelAr = 'آخر 30 يوم'; break;
+      case 'last_3_months':
+      case 'last_90_days':
+        start = new Date(now.getTime() - 90 * 86400000); labelAr = 'آخر 3 أشهر'; break;
+      case 'last_6_months':
+        start = new Date(now.getTime() - 182 * 86400000); labelAr = 'آخر 6 أشهر'; break;
       case 'this_month':
         start = new Date(now.getFullYear(), now.getMonth(), 1); labelAr = 'هذا الشهر'; break;
       case 'this_year':
         start = new Date(now.getFullYear(), 0, 1); labelAr = 'هذا العام'; break;
+      case 'all_time':
+        start = new Date(2000, 0, 1); labelAr = 'إجمالي كل الفترات'; break;
       case 'last_month':
       default:
         start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -1022,6 +1032,22 @@ export class ChatService {
     const netSales     = totalSales - totalReturns;
     const grossProfit  = netSales - cogs;
     const marginPct    = netSales > 0 ? Math.round((grossProfit / netSales) * 1000) / 10 : 0;
+    const avgBasket    = invoiceCount > 0 ? netSales / invoiceCount : 0;
+
+    // When this period has no sales, look up the lifetime picture so we can give
+    // a helpful answer ("no sales in this window, but your last sale was X and
+    // your all-time total is Y") instead of a dead "no sales".
+    let lifetime: { sales: number; lastSaleAt: string | null } | undefined;
+    if (invoiceCount === 0 && period !== 'all_time') {
+      const lf = await this.dataSource.query<{ sales: string; last_sale: string | null }[]>(`
+        SELECT COALESCE(SUM("totalAmount"), 0)::text AS sales,
+               MAX("createdAt")::text AS last_sale
+        FROM pos_transactions
+        WHERE "pharmacyTenantId" = $1 AND status = 'completed' AND type = 'sale'
+      `, [tenantId]).catch(() => [] as { sales: string; last_sale: string | null }[]);
+      const lifeSales = Number(lf[0]?.sales) || 0;
+      lifetime = { sales: lifeSales, lastSaleAt: lf[0]?.last_sale ?? null };
+    }
 
     const cards: ResponseCard[] = [
       {
@@ -1040,12 +1066,25 @@ export class ChatService {
           { label: 'هامش الربح', value: `${marginPct}%`, color: marginPct >= 0 ? 'emerald' : 'red' },
         ],
       },
+      {
+        type: 'kpi_row',
+        items: [
+          { label: 'عدد الفواتير', value: invoiceCount.toLocaleString('ar-EG'), color: 'emerald' },
+          { label: 'متوسط الفاتورة', value: fmtEgp(avgBasket), color: 'emerald' },
+        ],
+      },
     ];
 
     return {
       toolResult: {
-        period, labelAr, totalSales, totalReturns, netSales, cogs, grossProfit, marginPct, invoiceCount,
-        note: invoiceCount === 0 ? 'no_sales_in_period' : undefined,
+        period, labelAr, totalSales, totalReturns, netSales, cogs, grossProfit, marginPct, invoiceCount, avgBasket,
+        lifetimeSales: lifetime?.sales,
+        lastSaleAt: lifetime?.lastSaleAt,
+        note: invoiceCount === 0
+          ? (lifetime && lifetime.sales > 0
+              ? `no_sales_in_period_but_has_history: لا مبيعات في «${labelAr}». آخر عملية بيع كانت بتاريخ ${lifetime.lastSaleAt?.slice(0, 10) ?? '—'} وإجمالي مبيعاتك منذ البداية ${Math.round(lifetime.sales).toLocaleString('ar-EG')} ج.م. اقترح على المستخدم فترة أوسع مثل «كل الوقت» أو «آخر 3 أشهر».`
+              : 'no_sales_ever: لا توجد أي مبيعات مسجلة بعد. على الأرجح لم تُربط نقطة البيع أو لم تبدأ البيع بعد.')
+          : undefined,
       },
       cards,
     };

@@ -234,8 +234,33 @@ export class PosIntegrityMonitorCron {
     const flag = (this.config.get<string>('POS_ANOMALY_DETECTION_ENABLED') || '').toLowerCase();
     if (!(flag === 'true' || flag === '1' || flag === 'yes')) return;
 
-    // Pull recent closed shifts (60d) with the raw aggregates we turn into
-    // scale-free behavioural features. Bounded to keep the scan light.
+    // SCALE: process one tenant at a time so a global row cap can never starve
+    // some tenants of analysis. Only tenants that actually closed a shift in the
+    // last 24h have anything new to score, so we drive the loop off that set.
+    const tenants = await this.dataSource.query<{ tenantId: string }[]>(`
+      SELECT DISTINCT s."pharmacyTenantId" AS "tenantId"
+      FROM pos_shifts s
+      WHERE s.status = 'closed'
+        AND s."closedAt" > NOW() - INTERVAL '24 hours'
+        AND s."totalSales" >= $1
+    `, [PosIntegrityMonitorCron.MIN_SALES_FOR_ANALYSIS]);
+
+    for (const { tenantId } of tenants) {
+      try {
+        await this.checkBehavioralAnomaliesForTenant(tenantId);
+      } catch (err) {
+        // Error-isolate: one tenant's failure must not abort the rest.
+        this.logger.error(
+          `Behavioral anomaly scan failed for tenant ${tenantId}: ${(err as Error)?.message}`,
+        );
+      }
+    }
+  }
+
+  /** Per-tenant behavioural anomaly scan (bounded, self-contained). */
+  private async checkBehavioralAnomaliesForTenant(tenantId: string) {
+    // Pull this tenant's recent closed shifts (60d) with the raw aggregates we
+    // turn into scale-free behavioural features. Bounded per tenant.
     const rows = await this.dataSource.query<any[]>(`
       SELECT
         s.id,
@@ -253,22 +278,22 @@ export class PosIntegrityMonitorCron {
         s."returnCount",
         s."closedAt"
       FROM pos_shifts s
-      WHERE s.status = 'closed'
+      WHERE s."pharmacyTenantId" = $1
+        AND s.status = 'closed'
         AND s."closedAt" > NOW() - INTERVAL '60 days'
-        AND s."totalSales" >= $1
+        AND s."totalSales" >= $2
       ORDER BY s."cashierId", s."closedAt" ASC
       LIMIT 5000
-    `, [PosIntegrityMonitorCron.MIN_SALES_FOR_ANALYSIS]);
+    `, [tenantId, PosIntegrityMonitorCron.MIN_SALES_FOR_ANALYSIS]);
 
     if (rows.length === 0) return;
 
-    // Group by tenant + cashier.
+    // Group by cashier (already tenant-scoped by the query).
     const groups = new Map<string, any[]>();
     for (const r of rows) {
-      const key = `${r.tenantId}|${r.cashierId}`;
-      const arr = groups.get(key) ?? [];
+      const arr = groups.get(r.cashierId) ?? [];
       arr.push(r);
-      groups.set(key, arr);
+      groups.set(r.cashierId, arr);
     }
 
     const dayAgo = Date.now() - 24 * 3600 * 1000;

@@ -1044,6 +1044,7 @@ export class ChatService {
                MAX("createdAt")::text AS last_sale
         FROM pos_transactions
         WHERE "pharmacyTenantId" = $1 AND status = 'completed' AND type = 'sale'
+          AND "createdAt" >= NOW() - INTERVAL '3 years'
       `, [tenantId]).catch(() => [] as { sales: string; last_sale: string | null }[]);
       const lifeSales = Number(lf[0]?.sales) || 0;
       lifetime = { sales: lifeSales, lastSaleAt: lf[0]?.last_sale ?? null };

@@ -134,3 +134,41 @@ your COGS/margin and means nothing to a non-technical pharmacist.
 So the current AI Center "$ cost today" widget is best reframed for end-users as
 an **allowance/usage** meter, while the raw-dollar view lives in the internal
 Console (admin) surface. This protects margin and keeps the pharmacy UI simple.
+
+---
+
+## 7. Performance & scale (audited 2026-06-30)
+
+Every chat tool that reads data is bounded on three axes, so a single question
+can never scan or return an unbounded amount of data and stall the system:
+
+1. **Row caps** — every tool clamps `limit` via `safeInt(value, default, min, max)`
+   (default max 20; explicit per-tool maxes like 25). Even if the LLM requests
+   10,000 rows, it is clamped.
+2. **Date windows** — time-series tools (financial summary, top-selling, POS
+   shifts, forecasts) always run inside a bounded period; no "scan all history".
+   The lone lifetime fallback (shown only when a period has zero sales) is
+   bounded to the last 3 years.
+3. **`LIMIT` in SQL** — every list/search/sourcing query carries an explicit `LIMIT`.
+
+### Index coverage (hot query paths — all hit a matching index, no table scans)
+
+| Table | Index | Serves |
+|---|---|---|
+| `pos_transactions` | `(pharmacyTenantId, status, type, createdAt DESC) WHERE status='completed'` | Financial summary, sales |
+| `pos_transaction_items` | `(transactionId)`, `(productId)`, `(inventoryItemId)` | COGS / top-selling joins |
+| `inventory_items` | `(pharmacyTenantId, productId/expiryDate/deletedAt/linkStatus)` | Low stock, expiry, dead stock, search |
+| `approvals` | `(tenantId, status, createdAt DESC)` + pending partials | Pending AI tasks |
+| `demand_forecasts` | `(tenantId, productId, forecastDate)` | Forecast tools |
+| `p2p_listings` | `(productId, price) WHERE active` | P2P sourcing |
+| `supplier_catalog` | `(productId, price) WHERE isAvailable` | Cheapest-supplier sourcing |
+
+### Other safeguards
+- **Throttle** — 15 questions/min/user caps burst.
+- **5-min answer cache** — repeat questions = zero DB load.
+- **Tenant isolation** — all reads tenant-scoped; one pharmacy's volume never
+  affects another's plans.
+- **12s OpenAI client timeout** — a slow model call fails fast, never hangs the thread.
+
+> **Conclusion:** the assistant is scale-ready for thousands of pharmacies. The
+> dominant variable cost is OpenAI tokens (Section 2), not database load.

@@ -40,12 +40,15 @@ export class AiTokenBudget {
   private readonly logger = new Logger(AiTokenBudget.name);
   private readonly globalCap: number;
   private readonly featureCaps: Record<AiFeature, number>;
+  /** Optional hard money ceiling per tenant per day (USD). 0 = disabled. */
+  private readonly dailyCostCapUsd: number;
 
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     cfg: ConfigService,
   ) {
     this.globalCap = Number(cfg.get<string>('AI_DAILY_OUTPUT_TOKEN_CAP') ?? 200_000);
+    this.dailyCostCapUsd = Math.max(0, Number(cfg.get<string>('AI_DAILY_COST_CAP_USD') ?? 0));
 
     this.featureCaps = (Object.keys(DEFAULT_FEATURE_RATIO) as AiFeature[]).reduce((acc, f) => {
       const envKey = `AI_DAILY_OUTPUT_TOKEN_CAP_${f.toUpperCase()}`;
@@ -59,6 +62,13 @@ export class AiTokenBudget {
    * Returns true if the tenant still has budget today on this feature.
    * Indexed lookup on (tenantId, day, feature). Defaults `feature` to
    * 'procurement' to preserve original behaviour for legacy call sites.
+   *
+   * Two independent ceilings (whichever trips first blocks):
+   *   1. Per-feature OUTPUT token cap (always on).
+   *   2. Optional per-tenant TOTAL daily USD cost cap across ALL features
+   *      (input + output) — a hard money ceiling. Disabled unless
+   *      AI_DAILY_COST_CAP_USD is set. This is the real protection against
+   *      runaway spend, since cost is input-token-dominated.
    */
   async hasBudget(tenantId: string, feature: AiFeature = 'procurement'): Promise<boolean> {
     const rows = await this.ds.query(
@@ -67,7 +77,30 @@ export class AiTokenBudget {
       [tenantId, feature],
     );
     const used = Number(rows[0]?.outputTokens ?? 0);
-    return used < this.featureCaps[feature];
+    if (used >= this.featureCaps[feature]) return false;
+
+    // Hard money ceiling — sums input+output cost across every feature today.
+    if (this.dailyCostCapUsd > 0) {
+      try {
+        const agg = await this.ds.query(
+          `SELECT COALESCE(SUM("inputTokens"),0) AS inp, COALESCE(SUM("outputTokens"),0) AS out
+             FROM "ai_token_usage"
+            WHERE "tenantId" = $1 AND "day" = CURRENT_DATE`,
+          [tenantId],
+        );
+        const inp = Number(agg[0]?.inp ?? 0);
+        const out = Number(agg[0]?.out ?? 0);
+        const spentUsd = blendedCost(inp, out).totalCostUsd;
+        if (spentUsd >= this.dailyCostCapUsd) {
+          this.logger.warn(`[${tenantId}] daily USD cost cap reached: $${spentUsd.toFixed(4)} >= $${this.dailyCostCapUsd}`);
+          return false;
+        }
+      } catch (err) {
+        // Cost-cap bookkeeping must never break the AI flow — token cap still applies.
+        this.logger.warn(`cost-cap check failed (${tenantId}): ${(err as Error).message}`);
+      }
+    }
+    return true;
   }
 
   /**

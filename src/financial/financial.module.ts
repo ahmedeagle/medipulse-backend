@@ -5,12 +5,11 @@ import { CreditWallet } from './entities/credit-wallet.entity';
 import { PaymentTransaction } from './entities/payment-transaction.entity';
 import { SupplierSettlement } from './entities/supplier-settlement.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
-import { Notification } from '../notifications/entities/notification.entity';
 import { FinancialService } from './financial.service';
 import { FinancialController } from './financial.controller';
 import { FinancialHealthCron } from './financial-health.cron';
 import { CashFlowProjector } from './cash-flow-projector.service';
-import { NotificationService } from '../notifications/notification.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -20,11 +19,11 @@ import { NotificationService } from '../notifications/notification.service';
       PaymentTransaction,
       SupplierSettlement,
       Tenant,
-      Notification,
     ]),
+    NotificationsModule,
   ],
   controllers: [FinancialController],
-  providers:   [FinancialService, FinancialHealthCron, CashFlowProjector, NotificationService],
+  providers:   [FinancialService, FinancialHealthCron, CashFlowProjector],
   exports:     [FinancialService, CashFlowProjector],
 })
 export class FinancialModule {}

@@ -20,6 +20,8 @@ import { CreateReturnDto }     from './dto/create-return.dto';
 import { InvoiceQueryDto, ReturnQueryDto } from './dto/invoice-query.dto';
 import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 import { NotificationService } from '../notifications/notification.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PURCHASE_EVENTS } from '../events/domain-events';
 
 const FIELD_LABELS: Record<string, string> = {
   supplierName:          'اسم المورد',
@@ -53,6 +55,7 @@ export class PurchasesService {
     private readonly dataSource: DataSource,
     private readonly pharmacySettings: PharmacySettingsService,
     private readonly notificationSvc: NotificationService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private async writeChangelog(
@@ -977,7 +980,7 @@ export class PurchasesService {
   }
 
   async confirmReturn(tenantId: string, id: string) {
-    return this.dataSource.transaction(async (em) => {
+    const result = await this.dataSource.transaction(async (em) => {
       const ret = await em.findOne(PurchaseReturn, {
         where: { id, pharmacyTenantId: tenantId, deletedAt: null },
         relations: ['lines'],
@@ -1023,6 +1026,19 @@ export class PurchasesService {
 
       return em.findOne(PurchaseReturn, { where: { id }, relations: ['lines'] });
     });
+
+    // Decoupled measurement: money recovered back from the supplier. Emitted after
+    // commit so the recovery ledger only records confirmed refunds. Non-fatal.
+    if (result) {
+      this.eventEmitter.emit(PURCHASE_EVENTS.RETURN_CONFIRMED, {
+        pharmacyTenantId: tenantId,
+        returnId: result.id,
+        grandTotal: Number(result.grandTotal ?? 0),
+        supplierTenantId: result.supplierTenantId ?? null,
+        supplierName: result.supplierName ?? null,
+      });
+    }
+    return result;
   }
 
   async cancelReturn(tenantId: string, id: string) {

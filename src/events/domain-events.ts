@@ -202,3 +202,10 @@ export const P2P_EVENTS = {
   PROFILE_VERIFIED:   'p2p.profile.verified',
   PROFILE_REJECTED:   'p2p.profile.rejected',
 } as const;
+
+// ── Purchases / Supplier returns ──────────────────────────────────────────
+
+export const PURCHASE_EVENTS = {
+  /** A supplier return was confirmed — money recovered back from the supplier. */
+  RETURN_CONFIRMED: 'purchase.return.confirmed',
+} as const;

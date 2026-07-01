@@ -4,6 +4,10 @@ import { DataSource } from 'typeorm';
 import { Approval } from '../entities/approval.entity';
 import { ApprovalService } from '../approval.service';
 import { NotificationService } from '../../notifications/notification.service';
+import { RecoveryEventService } from '../../recovery/recovery-event.service';
+
+/** Standard replenishment lead time (days) — matches the EOQ default. */
+const STOCKOUT_LEAD_DAYS = 14;
 
 interface LowStockPayload {
   inventoryItemId: string;
@@ -29,6 +33,7 @@ export class LowStockExecutor {
     private readonly approvals: ApprovalService,
     private readonly notifications: NotificationService,
     private readonly dataSource: DataSource,
+    private readonly recovery: RecoveryEventService,
   ) {}
 
   @OnEvent('approval.approved')
@@ -111,6 +116,12 @@ export class LowStockExecutor {
         resourceRef: result.deepLink,
       });
 
+      // Measurement layer: reordering before stockout protects the margin of the
+      // sales that would have been lost during the replenishment lead window.
+      // Projected (value protected, never captured as new cash) and ONLY recorded
+      // when we have real consumption history + a real margin — no guessing.
+      await this.recordStockoutAvoided(approval, p, result.action);
+
       this.logger.log(
         `LowStockExecutor: action=${result.action} for approval ${approval.id}`,
       );
@@ -125,6 +136,72 @@ export class LowStockExecutor {
           executedAt: new Date().toISOString(),
         });
       } catch { /* state machine race */ }
+    }
+  }
+
+  /**
+   * Value protected by replenishing before a stockout = avoided lost margin over
+   * the lead window. Uses real weekly consumption (consumption_snapshots) and the
+   * item's real margin (sellingPrice − costPrice). Skips silently when either is
+   * missing/zero, so the ledger never carries a guessed number.
+   */
+  private async recordStockoutAvoided(
+    approval: Approval,
+    p: LowStockPayload,
+    action: ExecutionResult['action'],
+  ): Promise<void> {
+    try {
+      const [row] = await this.dataSource.query<Array<{
+        consumed: string | null; weeks: string | null;
+        selling: string | null; cost: string | null;
+      }>>(
+        `SELECT
+           (SELECT COALESCE(SUM(cs."quantityConsumed"), 0)
+              FROM consumption_snapshots cs
+             WHERE cs."tenantId" = $1 AND cs."productId" = $2
+               AND cs."weekStart" >= (CURRENT_DATE - INTERVAL '56 days'))            AS consumed,
+           (SELECT COUNT(DISTINCT cs."weekStart")
+              FROM consumption_snapshots cs
+             WHERE cs."tenantId" = $1 AND cs."productId" = $2
+               AND cs."weekStart" >= (CURRENT_DATE - INTERVAL '56 days'))            AS weeks,
+           ii."sellingPrice" AS selling,
+           ii."costPrice"    AS cost
+         FROM inventory_items ii
+         WHERE ii.id = $3
+         LIMIT 1`,
+        [approval.tenantId, p.productId, p.inventoryItemId],
+      );
+      if (!row) return;
+
+      const weeks = Number(row.weeks ?? 0);
+      const consumed = Number(row.consumed ?? 0);
+      const unitMargin = Math.max(Number(row.selling ?? 0) - Number(row.cost ?? 0), 0);
+      if (weeks <= 0 || consumed <= 0 || unitMargin <= 0) return; // no real basis → skip
+
+      const avgDailyUnits = consumed / (weeks * 7);
+      const expectedValueEgp = Math.round(avgDailyUnits * STOCKOUT_LEAD_DAYS * unitMargin * 100) / 100;
+      if (!(expectedValueEgp > 0)) return;
+
+      await this.recovery.record({
+        pharmacyTenantId: approval.tenantId,
+        type:             'stockout_avoided',
+        status:           'projected',
+        expectedValueEgp,
+        productId:        p.productId,
+        sourceType:       'approval',
+        sourceId:         approval.id,
+        subjectType:      'low_stock',
+        metadata: {
+          action,
+          avgDailyUnits: Math.round(avgDailyUnits * 100) / 100,
+          leadDays: STOCKOUT_LEAD_DAYS,
+          unitMargin: Math.round(unitMargin * 100) / 100,
+        },
+      });
+    } catch (err: any) {
+      this.logger.warn(
+        `LowStockExecutor: stockout_avoided measurement skipped for ${approval.id} — ${err.message}`,
+      );
     }
   }
 }

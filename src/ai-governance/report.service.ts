@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { Approval } from './entities/approval.entity';
 import { ApprovalEvent } from './entities/approval-event.entity';
 import { RecoveryEventService, RecoverySummary } from '../recovery/recovery-event.service';
+import { RecoveryEventType } from '../recovery/entities/recovery-event.entity';
 
 export type ReportPeriod = 'week' | 'month';
 
@@ -28,6 +29,18 @@ export interface AiCenterReport {
   realizedSavingsEgp: number;
   /** Persisted Financial Impact Measurement — durable, not computed on the fly. */
   recovery: RecoverySummary;
+  /**
+   * Cross-check: the legacy on-the-fly procurement savings vs. the persisted
+   * ledger's realized procurement recovery (purchase_saving + p2p_saving). If they
+   * diverge beyond tolerance, the ledger and the execution JSON are out of sync.
+   */
+  reconciliation: {
+    legacyProcurementSavingsEgp: number;
+    ledgerProcurementRealizedEgp: number;
+    ledgerRealizedEgp: number;
+    deltaEgp: number;
+    inSync: boolean;
+  };
   byBucket: ReportBucket[];
   backlog: {
     pending: number;
@@ -176,6 +189,19 @@ export class ReportService {
 
     const avgHrs = avgRow?.hrs != null ? Math.round(Number(avgRow.hrs) * 10) / 10 : null;
 
+    // Reconcile legacy procurement savings against the ledger's realized
+    // procurement recovery (like-for-like: purchase_saving + p2p_saving only).
+    const PROCUREMENT_TYPES: RecoveryEventType[] = ['purchase_saving', 'p2p_saving'];
+    const legacyProcurementSavingsEgp = Math.round(Number(savingsRow?.saved ?? 0));
+    const ledgerProcurementRealizedEgp = Math.round(
+      recovery.byType
+        .filter((t) => PROCUREMENT_TYPES.includes(t.type))
+        .reduce((sum, t) => sum + t.realizedEgp, 0),
+    );
+    const deltaEgp = legacyProcurementSavingsEgp - ledgerProcurementRealizedEgp;
+    const tolerance = Math.max(1, Math.round(legacyProcurementSavingsEgp * 0.01));
+    const inSync = Math.abs(deltaEgp) <= tolerance;
+
     return {
       period,
       since: since.toISOString(),
@@ -184,8 +210,15 @@ export class ReportService {
       executed: outcomeMap.get('executed') ?? 0,
       rejected: outcomeMap.get('rejected') ?? 0,
       missed: outcomeMap.get('expired') ?? 0,
-      realizedSavingsEgp: Math.round(Number(savingsRow?.saved ?? 0)),
+      realizedSavingsEgp: legacyProcurementSavingsEgp,
       recovery,
+      reconciliation: {
+        legacyProcurementSavingsEgp,
+        ledgerProcurementRealizedEgp,
+        ledgerRealizedEgp: Math.round(recovery.realizedEgp),
+        deltaEgp,
+        inSync,
+      },
       byBucket,
       backlog: {
         pending: Number(backlogRow?.pending ?? 0),

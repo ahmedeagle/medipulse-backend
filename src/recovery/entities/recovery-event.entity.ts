@@ -12,7 +12,7 @@ export type RecoveryEventType =
   | 'return_recovery';     // value recovered via supplier return
 
 export type RecoveryEventStatus = 'projected' | 'realized';
-export type RecoverySourceType = 'approval' | 'order' | 'cron' | 'agent';
+export type RecoverySourceType = 'approval' | 'order' | 'cron' | 'agent' | 'return';
 
 /**
  * ai_recovery_events — the persisted "Financial Impact Measurement" layer.

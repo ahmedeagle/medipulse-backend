@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 
-import { P2P_EVENTS } from '../events/domain-events';
+import { P2P_EVENTS, PURCHASE_EVENTS } from '../events/domain-events';
 import { RecoveryEventService } from './recovery-event.service';
 
 /**
@@ -26,5 +26,34 @@ export class RecoveryFinalizationListener {
   }): Promise<void> {
     if (!event?.orderId) return;
     await this.recovery.finalizeP2pOrderCompletion(event.orderId);
+  }
+
+  /**
+   * A confirmed supplier return is realized money back from the supplier.
+   * Idempotent per return via (sourceType='return', returnId, 'return_recovery').
+   */
+  @OnEvent(PURCHASE_EVENTS.RETURN_CONFIRMED, { async: true })
+  async onPurchaseReturnConfirmed(event: {
+    pharmacyTenantId: string;
+    returnId: string;
+    grandTotal: number;
+    supplierTenantId: string | null;
+    supplierName: string | null;
+  }): Promise<void> {
+    if (!event?.returnId || !(Number(event.grandTotal) > 0)) return;
+    await this.recovery.record({
+      pharmacyTenantId: event.pharmacyTenantId,
+      type:             'return_recovery',
+      status:           'realized',
+      amountEgp:        Number(event.grandTotal),
+      realizedValueEgp: Number(event.grandTotal),
+      sourceType:       'return',
+      sourceId:         event.returnId,
+      subjectType:      'purchase_return',
+      metadata: {
+        supplierTenantId: event.supplierTenantId,
+        supplierName: event.supplierName,
+      },
+    });
   }
 }

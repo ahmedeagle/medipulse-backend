@@ -2,6 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
+import {
+  NotificationSeverity,
+  NotificationChannel,
+  severityForType,
+  channelsForSeverity,
+} from './notification-policy';
 
 export interface CreateNotificationDto {
   tenantId:    string;
@@ -11,6 +17,10 @@ export interface CreateNotificationDto {
   body:        string;
   resourceRef?: string;
   emailSent?:  boolean;
+  /** Override the type-derived severity when the caller knows the real urgency. */
+  severity?:   NotificationSeverity;
+  /** Override the severity-derived delivery channels. */
+  channels?:   NotificationChannel[];
   /**
    * Optional coalescing window (ms). When set, a near-identical notification
    * already created within the window is reused instead of inserting a new
@@ -29,7 +39,13 @@ export class NotificationService {
   ) {}
 
   async create(dto: CreateNotificationDto): Promise<Notification> {
-    const { dedupeWindowMs, dedupeBy, ...row } = dto;
+    const { dedupeWindowMs, dedupeBy, severity: sevIn, channels: chIn, ...base } = dto;
+
+    // Central decision model: classify severity + intended channels from the type
+    // policy unless the caller overrode them. Applies to every producer for free.
+    const severity = sevIn ?? severityForType(base.type);
+    const channels = chIn ?? channelsForSeverity(severity);
+    const row = { ...base, severity, channels };
 
     if (dedupeWindowMs && dedupeWindowMs > 0) {
       const since = new Date(Date.now() - dedupeWindowMs);

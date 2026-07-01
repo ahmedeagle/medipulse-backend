@@ -94,6 +94,14 @@ export class Notification {
   @Column({ type: 'varchar', length: 100, nullable: true })
   resourceRef: string;
 
+  /** Urgency class driving delivery (low | medium | high | critical). */
+  @Column({ type: 'varchar', length: 12, nullable: true })
+  severity: string | null;
+
+  /** Intended delivery surfaces implied by severity (dashboard/in_app/push/whatsapp). */
+  @Column({ type: 'jsonb', nullable: true })
+  channels: string[] | null;
+
   /** Whether email was also sent */
   @Column({ type: 'boolean', default: false })
   emailSent: boolean;

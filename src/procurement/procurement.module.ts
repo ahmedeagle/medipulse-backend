@@ -36,6 +36,7 @@ import { SupplierModule } from '../supplier/supplier.module';
 import { FinancialModule } from '../financial/financial.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { RecoveryModule } from '../recovery/recovery.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     AnalyticsModule,
     PharmacySettingsModule,
     NotificationsModule,
+    RecoveryModule,
   ],
   controllers: [ProcurementController, DrugNeedController],
   providers: [

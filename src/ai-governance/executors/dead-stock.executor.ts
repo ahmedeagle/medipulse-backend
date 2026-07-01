@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { Approval } from '../entities/approval.entity';
 import { ApprovalService } from '../approval.service';
 import { NotificationService } from '../../notifications/notification.service';
+import { RecoveryEventService } from '../../recovery/recovery-event.service';
 
 interface DeadStockPayload {
   inventoryItemId: string;
@@ -26,6 +27,7 @@ export class DeadStockExecutor {
     private readonly approvals: ApprovalService,
     private readonly notifications: NotificationService,
     private readonly dataSource: DataSource,
+    private readonly recovery: RecoveryEventService,
   ) {}
 
   @OnEvent('approval.approved')
@@ -108,6 +110,19 @@ export class DeadStockExecutor {
       );
 
       await this.notifyPotentialBuyers(approval.tenantId, saved.id, p);
+
+      // Measurement layer: dead capital now being recovered. Projected until sold.
+      await this.recovery.record({
+        pharmacyTenantId: approval.tenantId,
+        type:             'deadstock_recovered',
+        status:           'projected',
+        expectedValueEgp: Number(sellingPrice) * Number(p.quantity),
+        productId:        p.productId,
+        sourceType:       'approval',
+        sourceId:         approval.id,
+        subjectType:      'dead_stock_clearance',
+        metadata:         { listingId: saved.id, discountPct: p.suggestedDiscountPct, quantity: p.quantity },
+      });
 
       await this.approvals.markExecuted(approval.tenantId, approval.id, {
         listingId:   saved.id,

@@ -6,6 +6,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Approval } from '../entities/approval.entity';
 import { ApprovalService } from '../approval.service';
 import { P2P_EVENTS } from '../../events/domain-events';
+import { RecoveryEventService } from '../../recovery/recovery-event.service';
 
 interface SmartProcurementPayload {
   sourceType: 'p2p' | 'supplier';
@@ -26,6 +27,7 @@ export class SmartProcurementExecutor {
     private readonly approvals: ApprovalService,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    private readonly recovery: RecoveryEventService,
   ) {}
 
   @OnEvent('approval.approved')
@@ -39,6 +41,25 @@ export class SmartProcurementExecutor {
         await this.executeProcurementFromP2P(approval, payload);
       } else {
         await this.executeProcurementFromSupplier(approval, payload);
+      }
+
+      // Measurement layer: realized saving vs historical average on this buy.
+      const saved = Number(
+        (approval.payload as any)?.explainability?.financialImpact?.savedVsHistoricalAvg ?? 0,
+      );
+      if (saved > 0) {
+        await this.recovery.record({
+          pharmacyTenantId: approval.tenantId,
+          type:             payload.sourceType === 'p2p' ? 'p2p_saving' : 'purchase_saving',
+          status:           'realized',
+          amountEgp:        saved,
+          expectedValueEgp: saved,
+          realizedValueEgp: saved,
+          productId:        payload.productId ?? null,
+          sourceType:       'approval',
+          sourceId:         approval.id,
+          subjectType:      'smart_procurement',
+        });
       }
     } catch (err) {
       const reason = (err as Error).message;

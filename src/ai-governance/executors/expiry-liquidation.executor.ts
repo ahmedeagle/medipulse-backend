@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { Approval } from '../entities/approval.entity';
 import { ApprovalService } from '../approval.service';
 import { NotificationService } from '../../notifications/notification.service';
+import { RecoveryEventService } from '../../recovery/recovery-event.service';
 
 interface ExpiryLiquidationPayload {
   inventoryItemId: string;
@@ -25,6 +26,7 @@ export class ExpiryLiquidationExecutor {
     private readonly approvals: ApprovalService,
     private readonly notifications: NotificationService,
     private readonly dataSource: DataSource,
+    private readonly recovery: RecoveryEventService,
   ) {}
 
   @OnEvent('approval.approved')
@@ -113,6 +115,20 @@ export class ExpiryLiquidationExecutor {
         price:       p.suggestedPrice,
         discountPct: p.discountPct,
         executedAt:  new Date().toISOString(),
+      });
+
+      // Measurement layer: near-expiry stock now being recovered. Projected until
+      // the P2P listing actually sells (realized on order completion, future wiring).
+      await this.recovery.record({
+        pharmacyTenantId: approval.tenantId,
+        type:             'expiry_avoided',
+        status:           'projected',
+        expectedValueEgp: Number(p.suggestedPrice) * Number(p.quantity),
+        productId:        p.productId,
+        sourceType:       'approval',
+        sourceId:         approval.id,
+        subjectType:      'expiry_liquidation',
+        metadata:         { listingId: saved.id, discountPct: p.discountPct, quantity: p.quantity },
       });
     } catch (err: any) {
       this.logger.error(

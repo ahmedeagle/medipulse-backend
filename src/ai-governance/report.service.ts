@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 
 import { Approval } from './entities/approval.entity';
 import { ApprovalEvent } from './entities/approval-event.entity';
+import { RecoveryEventService, RecoverySummary } from '../recovery/recovery-event.service';
 
 export type ReportPeriod = 'week' | 'month';
 
@@ -25,6 +26,8 @@ export interface AiCenterReport {
   rejected: number;   // reject transitions in period
   missed: number;     // expired-while-pending transitions in period
   realizedSavingsEgp: number;
+  /** Persisted Financial Impact Measurement — durable, not computed on the fly. */
+  recovery: RecoverySummary;
   byBucket: ReportBucket[];
   backlog: {
     pending: number;
@@ -70,13 +73,14 @@ export class ReportService {
   constructor(
     @InjectRepository(Approval) private readonly repo: Repository<Approval>,
     @InjectRepository(ApprovalEvent) private readonly events: Repository<ApprovalEvent>,
+    private readonly recovery: RecoveryEventService,
   ) {}
 
   async getReport(tenantId: string, period: ReportPeriod = 'week'): Promise<AiCenterReport> {
     const days = period === 'month' ? 30 : 7;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const [outcomes, proposedRow, savingsRow, byTypeRows, backlogRow, avgRow] = await Promise.all([
+    const [outcomes, proposedRow, savingsRow, byTypeRows, backlogRow, avgRow, recovery] = await Promise.all([
       // Outcome transitions in the period (accurate "what happened").
       this.events
         .createQueryBuilder('e')
@@ -142,6 +146,9 @@ export class ReportService {
         .andWhere('a."reviewedAt" IS NOT NULL')
         .andWhere('a."reviewedAt" >= :since', { since })
         .getRawOne<{ hrs: string | null }>(),
+
+      // Persisted recovery/impact summary (durable measurement layer).
+      this.recovery.summary(tenantId, since),
     ]);
 
     const outcomeMap = new Map(outcomes.map((r) => [r.status, Number(r.count)]));
@@ -178,6 +185,7 @@ export class ReportService {
       rejected: outcomeMap.get('rejected') ?? 0,
       missed: outcomeMap.get('expired') ?? 0,
       realizedSavingsEgp: Math.round(Number(savingsRow?.saved ?? 0)),
+      recovery,
       byBucket,
       backlog: {
         pending: Number(backlogRow?.pending ?? 0),

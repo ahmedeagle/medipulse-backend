@@ -30,6 +30,7 @@ import { AiTokenBudget }             from '../ai/governance/token-budget';
 import { AiCenterController }        from './ai-center.controller';
 import { NotificationsModule }       from '../notifications/notifications.module';
 import { CronLockModule }            from '../common/cron-lock/cron-lock.module';
+import { RecoveryModule }            from '../recovery/recovery.module';
 import { SmartProcurementExecutor }    from './executors/smart-procurement.executor';
 import { ListingSuggestionExecutor }   from './executors/listing-suggestion.executor';
 import { ExpiredQuarantineExecutor }   from './executors/expired-quarantine.executor';
@@ -61,6 +62,7 @@ import { DeadStockExecutor }           from './executors/dead-stock.executor';
     AiModule,
     P2pOrdersModule,
     PharmacySettingsModule,
+    RecoveryModule,
     TypeOrmModule.forFeature([
       AgentDefinition,
       AgentTenantSetting,

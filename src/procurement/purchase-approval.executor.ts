@@ -4,6 +4,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { ProcurementDraftService } from './procurement-draft.service';
 import { ApprovalService } from '../ai-governance/approval.service';
 import { Approval } from '../ai-governance/entities/approval.entity';
+import { RecoveryEventService } from '../recovery/recovery-event.service';
 
 /**
  * Executes Purchase-Expert approvals. When the user approves a
@@ -22,6 +23,7 @@ export class PurchaseApprovalExecutor {
   constructor(
     private readonly drafts:    ProcurementDraftService,
     private readonly approvals: ApprovalService,
+    private readonly recovery:  RecoveryEventService,
   ) {}
 
   @OnEvent('approval.approved')
@@ -38,6 +40,26 @@ export class PurchaseApprovalExecutor {
         executedAt: new Date().toISOString(),
       });
       this.logger.log(`approval ${approval.id} executed → order ${order?.id}`);
+
+      // Measurement layer: realized saving vs historical average price on this PO.
+      const saved = Number(
+        (approval.payload as any)?.explainability?.financialImpact?.savedVsHistoricalAvg ?? 0,
+      );
+      if (saved > 0) {
+        await this.recovery.record({
+          pharmacyTenantId: approval.tenantId,
+          type:             'purchase_saving',
+          status:           'realized',
+          amountEgp:        saved,
+          expectedValueEgp: saved,
+          realizedValueEgp: saved,
+          productId:        (approval.payload as any)?.productId ?? null,
+          sourceType:       'approval',
+          sourceId:         approval.id,
+          subjectType:      'procurement_draft',
+          metadata:         { orderId: order?.id },
+        });
+      }
     } catch (err) {
       const reason = (err as Error).message;
       this.logger.error(`approval ${approval.id} execution failed: ${reason}`);

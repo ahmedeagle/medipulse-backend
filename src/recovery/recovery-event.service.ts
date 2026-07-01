@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 
 import {
   RecoveryEvent,
@@ -37,6 +37,7 @@ export class RecoveryEventService {
   constructor(
     @InjectRepository(RecoveryEvent)
     private readonly repo: Repository<RecoveryEvent>,
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -69,6 +70,106 @@ export class RecoveryEventService {
     } catch (err) {
       this.logger.warn(
         `recovery record failed (${dto.type}/${dto.sourceId ?? 'n/a'}): ${(err as Error)?.message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Close the loop: a completed P2P order turns a *projected* recovery (near-expiry
+   * / dead-stock surplus the seller listed) into *realized* money captured.
+   *
+   * Honest by design — we ONLY realize when there is a matching open projected AI
+   * recovery event for the sold listing. An ordinary P2P sale that the AI never
+   * flagged is NOT counted as "recovery" (no guessing, no inflating ROI with
+   * normal revenue).
+   *
+   * Scale + correctness:
+   *   • One indexed PK lookup for the order, one partial-index lookup for the open
+   *     projection (idx_recovery_listing_open, WHERE status='projected'), so cost is
+   *     O(log n) regardless of ledger size.
+   *   • Idempotent: the realized row is UNIQUE on (sourceType='order', orderId, type)
+   *     and the pipeline is decremented ONLY when that insert actually created a row,
+   *     so a re-fired ORDER_COMPLETED can never double-count nor double-decrement.
+   *   • Partial sales safe: pipeline is reduced proportionally to the sold quantity;
+   *     multiple orders against one listing each realize their own slice.
+   *   • Never throws into the event pipeline — measurement must not break the order flow.
+   */
+  async finalizeP2pOrderCompletion(orderId: string): Promise<void> {
+    if (!orderId) return;
+    try {
+      await this.dataSource.transaction(async (trx) => {
+        const [order] = await trx.query(
+          `SELECT id, "sellerTenantId", "listingId", "requestedQty", "agreedPrice"
+             FROM p2p_orders
+            WHERE id = $1 AND status = 'completed'
+            LIMIT 1`,
+          [orderId],
+        );
+        if (!order) return;
+
+        const soldQty = Number(order.requestedQty);
+        const realizedTotal = soldQty * Number(order.agreedPrice);
+        if (!(realizedTotal > 0)) return;
+
+        // Newest still-open projected AI recovery event for this listing (partial index).
+        const [proj] = await trx.query(
+          `SELECT id, type, "productId", "expectedValueEgp",
+                  COALESCE((metadata->>'quantity')::numeric, 0) AS listed_qty
+             FROM ai_recovery_events
+            WHERE "pharmacyTenantId" = $1
+              AND status = 'projected'
+              AND "expectedValueEgp" > 0
+              AND metadata->>'listingId' = $2
+            ORDER BY "createdAt" DESC
+            LIMIT 1`,
+          [order.sellerTenantId, order.listingId],
+        );
+        if (!proj) return; // ordinary sale — not an AI-driven recovery; stay honest.
+
+        // Realized money captured — separate row, never mixed into the projected one.
+        const inserted = await trx.query(
+          `INSERT INTO ai_recovery_events
+             ("pharmacyTenantId", type, status, "amountEgp", "realizedValueEgp",
+              "productId", "sourceType", "sourceId", "subjectType", metadata)
+           VALUES ($1, $2, 'realized', $3, $3, $4, 'order', $5, 'p2p_order_completed', $6::jsonb)
+           ON CONFLICT ("sourceType", "sourceId", type) DO NOTHING
+           RETURNING id`,
+          [
+            order.sellerTenantId,
+            proj.type,
+            realizedTotal,
+            proj.productId,
+            order.id,
+            JSON.stringify({
+              listingId: order.listingId,
+              orderId: order.id,
+              quantity: soldQty,
+              unitPrice: Number(order.agreedPrice),
+              projectedFrom: proj.id,
+            }),
+          ],
+        );
+        if (!inserted.length) return; // duplicate completion — pipeline already reduced.
+
+        // Shrink the pipeline by exactly the sold slice (never below zero).
+        const listedQty = Number(proj.listed_qty) || 0;
+        const expected = Number(proj.expectedValueEgp);
+        const decrement =
+          listedQty > 0 ? Math.min((expected / listedQty) * soldQty, expected) : expected;
+        await trx.query(
+          `UPDATE ai_recovery_events
+              SET "expectedValueEgp" = GREATEST("expectedValueEgp" - $2, 0)
+            WHERE id = $1`,
+          [proj.id, decrement],
+        );
+
+        this.logger.log(
+          `recovery realized: order ${order.id} → ${proj.type} +${realizedTotal.toFixed(2)} EGP (pipeline -${decrement.toFixed(2)})`,
+        );
+      });
+    } catch (err) {
+      this.logger.warn(
+        `recovery finalize failed (order ${orderId}): ${(err as Error)?.message ?? err}`,
       );
     }
   }

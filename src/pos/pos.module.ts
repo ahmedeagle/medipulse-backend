@@ -3,6 +3,7 @@ import { TypeOrmModule }     from '@nestjs/typeorm';
 import { NotificationsModule }  from '../notifications/notifications.module';
 import { AiGovernanceModule }   from '../ai-governance/ai-governance.module';
 import { PharmacySettingsModule } from '../pharmacy-settings/pharmacy-settings.module';
+import { CronLockModule }      from '../common/cron-lock/cron-lock.module';
 import { PosShift }          from './entities/pos-shift.entity';
 import { PosTransaction }    from './entities/pos-transaction.entity';
 import { PosTransactionItem} from './entities/pos-transaction-item.entity';
@@ -19,6 +20,7 @@ import { MissedDemandService }         from '../inventory/missed-demand.service'
     NotificationsModule,
     AiGovernanceModule,
     PharmacySettingsModule,
+    CronLockModule,
     TypeOrmModule.forFeature([
       PosShift, PosTransaction, PosTransactionItem,
       PosCashMovement, PosCustomer, PosInsuranceCompany,

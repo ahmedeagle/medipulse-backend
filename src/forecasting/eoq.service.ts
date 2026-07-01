@@ -10,6 +10,7 @@ import { SupplierReliabilityScore } from '../supplier/entities/supplier-reliabil
 import { PreferredSupplier } from '../supplier/entities/preferred-supplier.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { TenantType } from '../common/enums/tenant-type.enum';
+import { CronLockService } from '../common/cron-lock/cron-lock.service';
 
 /**
  * Economic Order Quantity (EOQ) + Safety Stock + Reorder Point
@@ -64,12 +65,17 @@ export class EoqService {
     private readonly preferredRepo: Repository<PreferredSupplier>,
     @InjectRepository(Tenant)
     private readonly tenantRepo: Repository<Tenant>,
+    private readonly cronLock: CronLockService,
   ) {}
 
-  // ─── Daily cron: refresh EOQ and schedules ────────────────────────────────
+  // ─── Daily cron: refresh EOQ and schedules ───────────────────────────
 
   @Cron('0 3 * * *')  // 3am daily
   async refreshAllSchedules(): Promise<void> {
+    // Single-flight across HTTP + worker processes/pods — only one runs.
+    const acquired = await this.cronLock.acquire('eoq_refresh_daily');
+    if (!acquired) return;
+
     const pharmacies = await this.tenantRepo.find({
       where: { type: TenantType.PHARMACY, isActive: true },
     });

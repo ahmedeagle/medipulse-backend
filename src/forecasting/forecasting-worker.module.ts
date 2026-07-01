@@ -12,6 +12,7 @@ import { PreferredSupplier } from '../supplier/entities/preferred-supplier.entit
 import { Tenant } from '../auth/entities/tenant.entity';
 import { ProphetForecastComparison } from './entities/prophet-forecast-comparison.entity';
 import { ProphetShadowService } from './prophet-shadow.service';
+import { CronLockModule } from '../common/cron-lock/cron-lock.module';
 
 /**
  * Imported only by WorkerAppModule.
@@ -19,6 +20,7 @@ import { ProphetShadowService } from './prophet-shadow.service';
  */
 @Module({
   imports: [
+    CronLockModule,
     TypeOrmModule.forFeature([
       DemandForecast,
       ProcurementSchedule,

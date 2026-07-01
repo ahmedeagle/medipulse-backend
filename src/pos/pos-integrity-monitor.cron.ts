@@ -6,6 +6,7 @@ import { ApprovalService } from '../ai-governance/approval.service';
 import { NotificationService } from '../notifications/notification.service';
 import { PharmacySettingsService } from '../pharmacy-settings/pharmacy-settings.service';
 import { IsolationForest } from './anomaly/isolation-forest';
+import { CronLockService } from '../common/cron-lock/cron-lock.service';
 
 /**
  * Runs every hour. Analyzes recently closed shifts for:
@@ -37,10 +38,15 @@ export class PosIntegrityMonitorCron {
     private readonly notifications:  NotificationService,
     private readonly settingsSvc:    PharmacySettingsService,
     private readonly config:         ConfigService,
+    private readonly cronLock:       CronLockService,
   ) {}
 
   @Cron('*/15 * * * *')
   async analyzeClosedShifts() {
+    // Single-flight across processes/pods — only one runs per interval.
+    const acquired = await this.cronLock.acquire('pos_integrity_monitor', 600);
+    if (!acquired) return;
+
     this.logger.debug('POS Integrity check started');
     try {
       await this.checkCashMismatches();

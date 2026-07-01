@@ -5,6 +5,7 @@ import { MatchProcessor } from './match.processor';
 import { ImportBatchService } from './import-batch.service';
 import { InventoryImportService } from './inventory-import.service';
 import { CatalogMatchingService } from './catalog-matching.service';
+import { CatalogEmbeddingsService } from './catalog-embeddings.service';
 import { InventoryItem } from './entities/inventory-item.entity';
 import { Product } from './entities/product.entity';
 import { ImportBatch } from './entities/import-batch.entity';
@@ -37,6 +38,7 @@ import { MATCH_QUEUE } from './match.constants';
     ImportBatchService,
     InventoryImportService,
     CatalogMatchingService,
+    CatalogEmbeddingsService,
   ],
 })
 export class MatchWorkerModule {}

@@ -20,8 +20,10 @@ import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.
 import { ApprovalService }           from './approval.service';
 import { AgentService }              from './agent.service';
 import { DashboardService }          from './dashboard.service';
+import { ReportService }             from './report.service';
 import { ApprovalScheduler }         from './approval.scheduler';
 import { BriefingScheduler }         from './briefing.scheduler';
+import { ApprovalExpiryReminderScheduler } from './approval-expiry-reminder.scheduler';
 import { AgentBridgeService }        from './agent-bridge.service';
 import { AiAuditStatsService }       from './ai-audit-stats.service';
 import { AiTokenBudget }             from '../ai/governance/token-budget';
@@ -78,8 +80,10 @@ import { DeadStockExecutor }           from './executors/dead-stock.executor';
     ApprovalService,
     AgentService,
     DashboardService,
+    ReportService,
     ApprovalScheduler,
     BriefingScheduler,
+    ApprovalExpiryReminderScheduler,
     AgentBridgeService,
     AiAuditStatsService,
     AiTokenBudget,

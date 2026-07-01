@@ -19,6 +19,7 @@ export type NotificationType =
   | 'inventory_batch_failed'
   | 'morning_briefing'
   | 'ai_governance_blocked'
+  | 'approval_expiring'   // pending AI approvals about to expire unactioned
   | 'system'
   // ── PEN (Pharmacy Exchange Network) ───────────────────────────────────────
   | 'p2p_order_received'
@@ -57,7 +58,10 @@ export type NotificationType =
   // ── Decision Engine (P1 auto-draft outcomes) ──────────────────────────────
   | 'procurement_delay_suggested'  // orchestrator suggests delaying purchase for cash-flow reasons
   | 'p2p_opportunity'              // orchestrator found a cheaper P2P alternative
-  | 'p2p_pool_opportunity';        // regional pooling: a nearby pharmacy needs your surplus → list it
+  | 'p2p_pool_opportunity'         // regional pooling: a nearby pharmacy needs your surplus → list it
+  // ── Demand Broadcast ("أحتاج دواء") ───────────────────────────────────────
+  | 'drug_need_broadcast'          // nearby pharmacy needs a drug you hold in stock → respond
+  | 'drug_need_response';          // requester notification: a nearby pharmacy can supply your need
 
 /**
  * In-app notification per user.

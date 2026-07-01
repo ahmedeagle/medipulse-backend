@@ -7,6 +7,7 @@ import { ConsumptionSnapshot } from '../inventory/entities/consumption-snapshot.
 import { Tenant } from '../auth/entities/tenant.entity';
 import { TenantType } from '../common/enums/tenant-type.enum';
 import { ProphetShadowService } from './prophet-shadow.service';
+import { CronLockService } from '../common/cron-lock/cron-lock.service';
 
 /**
  * Holt-Winters Double Exponential Smoothing (Holt's Linear)
@@ -53,12 +54,20 @@ export class DemandForecastingService {
     @InjectRepository(Tenant)
     private readonly tenantRepo: Repository<Tenant>,
     private readonly prophetShadow: ProphetShadowService,
+    private readonly cronLock: CronLockService,
   ) {}
 
   // ─── Weekly cron: compute forecasts for all pharmacy-product pairs ────────
 
   @Cron('0 6 * * 0') // Sunday 6am — after consumption snapshots are computed
   async computeAllForecasts(): Promise<void> {
+    // Single-flight across HTTP + worker processes/pods — only one runs.
+    const acquired = await this.cronLock.acquire('demand_forecast_weekly');
+    if (!acquired) {
+      this.logger.log('Demand forecast computation skipped (lock held by another process)');
+      return;
+    }
+
     this.logger.log('Demand forecast computation started');
 
     const pharmacies = await this.tenantRepo.find({

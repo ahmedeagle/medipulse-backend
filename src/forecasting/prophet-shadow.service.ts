@@ -7,6 +7,7 @@ import axios from 'axios';
 import { ProphetForecastComparison } from './entities/prophet-forecast-comparison.entity';
 import { ConsumptionSnapshot } from '../inventory/entities/consumption-snapshot.entity';
 import type { ForecastResult } from './demand-forecasting.service';
+import { CronLockService } from '../common/cron-lock/cron-lock.service';
 
 /**
  * ProphetShadowService — TRUST-GATED shadow evaluation of an external Prophet
@@ -32,6 +33,7 @@ export class ProphetShadowService {
     @InjectRepository(ConsumptionSnapshot)
     private readonly snapshotRepo: Repository<ConsumptionSnapshot>,
     private readonly config: ConfigService,
+    private readonly cronLock: CronLockService,
   ) {}
 
   isEnabled(): boolean {
@@ -148,6 +150,10 @@ export class ProphetShadowService {
   async updateShadowAccuracy(): Promise<void> {
     if (!this.isEnabled()) return;
 
+    // Single-flight across HTTP + worker processes/pods — only one runs.
+    const acquired = await this.cronLock.acquire('prophet_shadow_accuracy_weekly');
+    if (!acquired) return;
+
     const fourWeeksAgo = new Date(Date.now() - 28 * 86_400_000);
     const pending = await this.cmpRepo
       .createQueryBuilder('c')
@@ -190,6 +196,69 @@ export class ProphetShadowService {
         // ignore individual row failures
       }
     }
+  }
+
+  /**
+   * Read-only accuracy summary for one pharmacy. Powers the "AI model validation"
+   * card in the UI so admins can SEE that the forecasting engine is continuously
+   * benchmarked against Facebook Prophet — and which one is winning.
+   *
+   * Safe to call even when shadow mode is OFF: it simply reports `enabled: false`
+   * with whatever historical comparisons already exist (none, typically).
+   */
+  async getAccuracySummary(tenantId: string): Promise<{
+    enabled: boolean;
+    totalComparisons: number;
+    evaluated: number;
+    holtWins: number;
+    prophetWins: number;
+    avgHoltMapePct: number | null;
+    avgProphetMapePct: number | null;
+    recommendation: 'holt_winters' | 'prophet' | 'insufficient_data';
+    lastEvaluatedAt: string | null;
+  }> {
+    const enabled = this.isEnabled();
+
+    const rows = await this.cmpRepo
+      .createQueryBuilder('c')
+      .where('c.tenantId = :tenantId', { tenantId })
+      .getMany();
+
+    const evaluated = rows.filter(
+      (r) => r.holtMape !== null && r.holtMape !== undefined
+        && r.prophetMape !== null && r.prophetMape !== undefined,
+    );
+
+    const holtWins = evaluated.filter((r) => r.status === 'holt_better').length;
+    const prophetWins = evaluated.filter((r) => r.status === 'prophet_better').length;
+
+    const avg = (vals: number[]): number | null =>
+      vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 1000) / 10 : null;
+
+    const avgHoltMapePct = avg(evaluated.map((r) => Number(r.holtMape)).filter((n) => Number.isFinite(n)));
+    const avgProphetMapePct = avg(evaluated.map((r) => Number(r.prophetMape)).filter((n) => Number.isFinite(n)));
+
+    let recommendation: 'holt_winters' | 'prophet' | 'insufficient_data' = 'insufficient_data';
+    if (evaluated.length >= 20) {
+      recommendation = prophetWins > holtWins ? 'prophet' : 'holt_winters';
+    }
+
+    const lastEvaluatedAt = rows
+      .map((r) => (r.actualQty != null ? new Date((r as any).updatedAt ?? r.forecastDate) : null))
+      .filter((d): d is Date => !!d && !Number.isNaN(d.getTime()))
+      .sort((a, b) => b.getTime() - a.getTime())[0]?.toISOString() ?? null;
+
+    return {
+      enabled,
+      totalComparisons: rows.length,
+      evaluated: evaluated.length,
+      holtWins,
+      prophetWins,
+      avgHoltMapePct,
+      avgProphetMapePct,
+      recommendation,
+      lastEvaluatedAt,
+    };
   }
 
   private mape(actual: number, predicted: number): number | null {

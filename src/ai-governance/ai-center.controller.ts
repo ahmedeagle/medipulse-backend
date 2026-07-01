@@ -28,6 +28,7 @@ import { Role } from '../common/enums/role.enum';
 import { ApprovalService } from './approval.service';
 import { AgentService } from './agent.service';
 import { DashboardService } from './dashboard.service';
+import { ReportService, ReportPeriod } from './report.service';
 import { AgentBridgeService } from './agent-bridge.service';
 import { AiAuditStatsService } from './ai-audit-stats.service';
 import { AiTokenBudget } from '../ai/governance/token-budget';
@@ -64,6 +65,7 @@ export class AiCenterController {
     private readonly approvals: ApprovalService,
     private readonly agents:    AgentService,
     private readonly dashboard: DashboardService,
+    private readonly report:    ReportService,
     private readonly bridge:    AgentBridgeService,
     private readonly aiStats:   AiAuditStatsService,
     private readonly tokenBudget: AiTokenBudget,
@@ -87,6 +89,14 @@ export class AiCenterController {
   @ApiOperation({ summary: 'Aggregated KPIs + pending-approval preview for the dashboard home' })
   workforce(@CurrentUser() user: any) {
     return this.dashboard.summary(user.tenantId);
+  }
+
+  @Get('report')
+  @Roles(Role.PHARMACY_ADMIN)
+  @ApiOperation({ summary: 'Impact & status report: funnel, missed tasks, realized savings, backlog SLA' })
+  reportSummary(@CurrentUser() user: any, @Query('period') period?: string) {
+    const p: ReportPeriod = period === 'month' ? 'month' : 'week';
+    return this.report.getReport(user.tenantId, p);
   }
 
   // ── Agents ──────────────────────────────────────────────────────────────

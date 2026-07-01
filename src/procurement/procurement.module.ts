@@ -11,8 +11,13 @@ import { ConflictResolutionEngine } from './conflict-resolution.engine';
 import { ProcurementCartService } from './procurement-cart.service';
 import { ProcurementOrderBuilder } from './procurement-order.builder';
 import { AskAgentService } from './ask-agent.service';
+import { DrugNeedService } from './drug-need.service';
+import { DrugNeedController } from './drug-need.controller';
+import { DemandBroadcastService } from './demand-broadcast.service';
 
 import { ProcurementDraft } from './entities/procurement-draft.entity';
+import { DrugNeedRequest } from './entities/drug-need-request.entity';
+import { Product } from '../inventory/entities/product.entity';
 import { AiRecommendation } from '../ai/entities/ai-recommendation.entity';
 import { SupplierCatalogItem } from '../supplier/entities/supplier-catalog-item.entity';
 import { SupplierReliabilityScore } from '../supplier/entities/supplier-reliability-score.entity';
@@ -30,11 +35,14 @@ import { P2pMarketplaceModule } from '../p2p-marketplace/p2p-marketplace.module'
 import { SupplierModule } from '../supplier/supplier.module';
 import { FinancialModule } from '../financial/financial.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       ProcurementDraft,
+      DrugNeedRequest,
+      Product,
       AiRecommendation,
       SupplierCatalogItem,
       SupplierReliabilityScore,
@@ -52,10 +60,13 @@ import { AnalyticsModule } from '../analytics/analytics.module';
     FinancialModule,
     AnalyticsModule,
     PharmacySettingsModule,
+    NotificationsModule,
   ],
-  controllers: [ProcurementController],
+  controllers: [ProcurementController, DrugNeedController],
   providers: [
     ProcurementDraftService,
+    DrugNeedService,
+    DemandBroadcastService,
     ProcurementDraftListener,
     PurchaseApprovalExecutor,
     PurchaseBasketExecutor,
@@ -65,6 +76,6 @@ import { AnalyticsModule } from '../analytics/analytics.module';
     ProcurementOrderBuilder,
     AskAgentService,
   ],
-  exports: [ProcurementDraftService, ProcurementOrchestrator, ProcurementCartService],
+  exports: [ProcurementDraftService, ProcurementOrchestrator, ProcurementCartService, DrugNeedService],
 })
 export class ProcurementModule {}

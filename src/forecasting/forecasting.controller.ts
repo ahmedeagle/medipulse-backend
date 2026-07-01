@@ -15,6 +15,7 @@ import {
 } from '@nestjs/swagger';
 import { DemandForecastingService } from './demand-forecasting.service';
 import { EoqService } from './eoq.service';
+import { ProphetShadowService } from './prophet-shadow.service';
 import { DeadStockService } from '../inventory/dead-stock.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -34,6 +35,7 @@ export class ForecastingController {
     private readonly forecastingSvc: DemandForecastingService,
     private readonly eoqSvc: EoqService,
     private readonly deadStockSvc: DeadStockService,
+    private readonly prophetShadow: ProphetShadowService,
   ) {}
 
   @Get('demand')
@@ -93,6 +95,21 @@ export class ForecastingController {
   @ApiOkResponse({ description: '{ value: number, count: number }' })
   getDeadStockSummary(@CurrentUser() user: any) {
     return this.deadStockSvc.getTotalDeadStockValue(user.tenantId);
+  }
+
+  @Get('model-accuracy')
+  @AuditRead('forecast_model_accuracy')
+  @ApiOperation({
+    summary: 'Forecasting model validation — Holt-Winters vs Facebook Prophet',
+    description:
+      'Shows how the live Holt-Winters engine is continuously benchmarked against a ' +
+      'shadow Facebook Prophet model on this pharmacy\u2019s own demand. Returns win counts, ' +
+      'average forecast error (MAPE %) for each engine, and which model is recommended. ' +
+      'Read-only and fail-safe — the shadow comparison never affects live reorder decisions.',
+  })
+  @ApiOkResponse()
+  getModelAccuracy(@CurrentUser() user: any) {
+    return this.prophetShadow.getAccuracySummary(user.tenantId);
   }
 
   @Get('seasonality')

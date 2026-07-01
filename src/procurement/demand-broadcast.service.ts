@@ -7,6 +7,8 @@ import { NotificationService } from '../notifications/notification.service';
 
 const APP_NAME = 'Bnoov';
 const MAX_TARGETS = 20;
+// Only broadcast to stock-holders within this radius when coordinates exist.
+const RADIUS_KM = 15;
 // One broadcast per (holder, need) at most within this window — kills spam.
 const DEDUPE_WINDOW_MS = 6 * 60 * 60 * 1000; // 6h
 
@@ -109,31 +111,65 @@ export class DemandBroadcastService {
 
   // ─── helpers ────────────────────────────────────────────────────────────────
 
-  /** Nearby (same-city) verified+visible pharmacies that hold the product in stock. */
+  /**
+   * Nearby verified+visible pharmacies that hold the product in stock.
+   *
+   * Proximity strategy (graceful degradation):
+   *   • If the requester has coordinates → rank stock-holders by real Haversine
+   *     distance and keep only those within RADIUS_KM (nearest first). Holders
+   *     without coordinates in the same city are still included as a tail.
+   *   • If the requester has no coordinates → fall back to same-city match.
+   */
   private async findNearbyHolders(productId: string, requesterTenantId: string): Promise<HolderRow[]> {
-    const rows: Array<{ tenantId: string; whatsapp: string | null; qty: string }> =
+    const rows: Array<{ tenantId: string; whatsapp: string | null; qty: string; distanceKm: string | null }> =
       await this.dataSource.query(
         `
+        WITH me AS (
+          SELECT city, latitude, longitude
+          FROM seller_profiles
+          WHERE "pharmacyTenantId" = $2
+          LIMIT 1
+        )
         SELECT
           inv."pharmacyTenantId" AS "tenantId",
           sp.whatsapp            AS whatsapp,
-          inv.quantity           AS qty
+          inv.quantity           AS qty,
+          CASE
+            WHEN me.latitude IS NOT NULL AND me.longitude IS NOT NULL
+             AND sp.latitude IS NOT NULL AND sp.longitude IS NOT NULL
+            THEN 6371 * acos(
+              LEAST(1, GREATEST(-1,
+                cos(radians(me.latitude)) * cos(radians(sp.latitude)) *
+                cos(radians(sp.longitude) - radians(me.longitude)) +
+                sin(radians(me.latitude)) * sin(radians(sp.latitude))
+              ))
+            )
+            ELSE NULL
+          END AS "distanceKm"
         FROM inventory_items inv
         INNER JOIN seller_profiles sp
           ON sp."pharmacyTenantId" = inv."pharmacyTenantId"
          AND sp."verificationStatus" = 'verified'
          AND sp."isVisible" = true
+        CROSS JOIN me
         WHERE inv."productId" = $1
           AND inv.quantity > 0
           AND inv."deletedAt" IS NULL
           AND inv."pharmacyTenantId" != $2
-          AND sp.city IS NOT NULL
-          AND sp.city = (
-            SELECT city FROM seller_profiles
-            WHERE "pharmacyTenantId" = $2 AND city IS NOT NULL
-            LIMIT 1
+          AND (
+            -- within radius when both sides have coordinates …
+            (me.latitude IS NOT NULL AND sp.latitude IS NOT NULL AND
+              6371 * acos(
+                LEAST(1, GREATEST(-1,
+                  cos(radians(me.latitude)) * cos(radians(sp.latitude)) *
+                  cos(radians(sp.longitude) - radians(me.longitude)) +
+                  sin(radians(me.latitude)) * sin(radians(sp.latitude))
+                ))
+              ) <= ${RADIUS_KM})
+            -- … otherwise same-city fallback
+            OR (sp.city IS NOT NULL AND me.city IS NOT NULL AND sp.city = me.city)
           )
-        ORDER BY inv.quantity DESC
+        ORDER BY "distanceKm" ASC NULLS LAST, inv.quantity DESC
         LIMIT ${MAX_TARGETS}
         `,
         [productId, requesterTenantId],

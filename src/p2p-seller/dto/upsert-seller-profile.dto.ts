@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsIn,
   Min,
+  Max,
   IsObject,
   IsEmail,
   MaxLength,
@@ -54,6 +55,19 @@ export class UpsertSellerProfileDto {
   @IsString()
   gpsLocation?: string;
 
+  /** Structured coordinates — enable nearest-first Demand Broadcast targeting. */
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  latitude?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  longitude?: number;
+
   @IsOptional()
   @IsString()
   city?: string;
@@ -77,10 +91,9 @@ export class UpsertSellerProfileDto {
   @MaxLength(255)
   email?: string;
 
-  @IsOptional()
   @IsString()
   @Matches(/^[\d\s\-+()]{4,32}$/, { message: 'whatsapp must be a valid phone number' })
-  whatsapp?: string;
+  whatsapp: string;
 
   @IsOptional()
   @IsBoolean()

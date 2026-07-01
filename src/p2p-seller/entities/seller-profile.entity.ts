@@ -32,6 +32,13 @@ export class SellerProfile {
   @Column({ type: 'varchar', length: 100, nullable: true })
   gpsLocation: string;
 
+  /** Structured coordinates for proximity ranking (Demand Broadcast, P2P nearest-first). */
+  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true })
+  latitude: number | null;
+
+  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true })
+  longitude: number | null;
+
   @Column({ type: 'varchar', length: 100, nullable: true })
   city: string;
 

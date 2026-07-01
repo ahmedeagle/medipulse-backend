@@ -20,6 +20,7 @@ export type NotificationType =
   | 'morning_briefing'
   | 'ai_governance_blocked'
   | 'approval_expiring'   // pending AI approvals about to expire unactioned
+  | 'usage_limit_reached' // monthly AI or WhatsApp credits exhausted
   | 'system'
   // ── PEN (Pharmacy Exchange Network) ───────────────────────────────────────
   | 'p2p_order_received'

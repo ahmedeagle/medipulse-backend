@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { Notification } from './entities/notification.entity';
 import { NotificationSeverity, NotificationChannel } from './notification-policy';
 import { NotificationPreferencesService } from './notification-preferences.service';
+import { UsageService } from '../usage/usage.service';
 
 /**
  * The Delivery Dispatcher — the final stage of:
@@ -27,6 +28,7 @@ export class NotificationDispatcherService {
     private readonly preferences: NotificationPreferencesService,
     private readonly dataSource: DataSource,
     private readonly config: ConfigService,
+    private readonly usage: UsageService,
   ) {}
 
   /** Resolve the effective channels for a delivery (Preference Filter). */
@@ -48,6 +50,10 @@ export class NotificationDispatcherService {
     const channels = (notification.channels ?? []) as NotificationChannel[];
     if (!channels.includes('whatsapp')) return;
     if (!this.whatsappEnabled()) return;
+    // Enforce the tenant's monthly WhatsApp cap. consume() also raises a one-time
+    // "credits finished" in-app notice, so the pharmacy is aware. Never send when over.
+    const quota = await this.usage.consume(notification.tenantId, 'whatsapp');
+    if (!quota.allowed) return;
     try {
       await this.enqueueWhatsapp(notification);
     } catch (err) {

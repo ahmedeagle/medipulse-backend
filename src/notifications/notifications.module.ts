@@ -11,9 +11,13 @@ import { NotificationPreference } from './entities/notification-preference.entit
 import { User } from '../auth/entities/user.entity';
 import { Tenant } from '../auth/entities/tenant.entity';
 import { SellerProfile } from '../p2p-seller/entities/seller-profile.entity';
+import { UsageModule } from '../usage/usage.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Notification, NotificationPreference, User, Tenant, SellerProfile])],
+  imports: [
+    TypeOrmModule.forFeature([Notification, NotificationPreference, User, Tenant, SellerProfile]),
+    UsageModule,
+  ],
   controllers: [NotificationController],
   providers: [
     NotificationService,

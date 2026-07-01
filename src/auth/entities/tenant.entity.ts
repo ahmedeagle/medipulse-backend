@@ -30,6 +30,10 @@ export class Tenant {
   @Column({ type: 'boolean', default: true })
   isActive: boolean;
 
+  /** Subscription plan whose usage caps apply (free | starter | pro | enterprise). */
+  @Column({ type: 'varchar', length: 16, default: 'free' })
+  planTier: string;
+
   // ── Multi-org hierarchy fields (Phase 1.5 Month 3) ───────────────────────
 
   /** Parent organization (pharmacy chain / hospital network). Null = standalone. */

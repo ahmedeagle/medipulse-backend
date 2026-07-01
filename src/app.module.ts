@@ -25,6 +25,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { AuthEventsModule } from './auth/auth-events.module';
 import { ForecastingModule } from './forecasting/forecasting.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { UsageModule } from './usage/usage.module';
 import { WorkflowModule } from './workflow/workflow.module';
 import { FinancialModule } from './financial/financial.module';
 import { SecurityModule } from './security/security.module';
@@ -132,6 +133,7 @@ import { CorrelationIdMiddleware } from './common/middleware/correlation-id.midd
     AuthEventsModule,
     ForecastingModule,
     NotificationsModule,
+    UsageModule,
     WorkflowModule,
     FinancialModule,
     SecurityModule,

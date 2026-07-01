@@ -13,11 +13,13 @@ import { RedisModule }      from '../common/redis/redis.module';
 import { ChatAnswerCache }  from './chat-answer.cache';
 import { ChatService }      from './chat.service';
 import { ChatController }   from './chat.controller';
+import { UsageModule }      from '../usage/usage.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([InventoryItem, Approval, PriceSnapshot, ChatConversation, ChatMessage]),
     RedisModule,
+    UsageModule,
   ],
   providers:   [ChatService, DashboardService, DeadStockService, AiTokenBudget, ChatAnswerCache],
   controllers: [ChatController],

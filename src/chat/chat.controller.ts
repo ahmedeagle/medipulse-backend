@@ -20,6 +20,7 @@ import { CurrentUser }   from '../common/decorators/current-user.decorator';
 import { Role }          from '../common/enums/role.enum';
 import { AskChatDto, ChatExecuteDto } from './dto/ask-chat.dto';
 import { ChatService }   from './chat.service';
+import { AiUsageGuard }  from '../usage/ai-usage.guard';
 
 @ApiTags('Chat')
 @ApiBearerAuth()
@@ -31,6 +32,7 @@ export class ChatController {
   @Post('ask')
   @HttpCode(200)
   @Roles(Role.PHARMACY_ADMIN, Role.CHAIN_ADMIN)
+  @UseGuards(AiUsageGuard)
   @Throttle({ default: { limit: 15, ttl: 60_000 } })
   @ApiOperation({ summary: 'Ask the AI assistant a natural-language question about your pharmacy' })
   ask(

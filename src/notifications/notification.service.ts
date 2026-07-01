@@ -8,6 +8,7 @@ import {
   severityForType,
   channelsForSeverity,
 } from './notification-policy';
+import { NotificationDispatcherService } from './notification-dispatcher.service';
 
 export interface CreateNotificationDto {
   tenantId:    string;
@@ -36,6 +37,7 @@ export class NotificationService {
   constructor(
     @InjectRepository(Notification)
     private readonly repo: Repository<Notification>,
+    private readonly dispatcher: NotificationDispatcherService,
   ) {}
 
   async create(dto: CreateNotificationDto): Promise<Notification> {
@@ -44,7 +46,14 @@ export class NotificationService {
     // Central decision model: classify severity + intended channels from the type
     // policy unless the caller overrode them. Applies to every producer for free.
     const severity = sevIn ?? severityForType(base.type);
-    const channels = chIn ?? channelsForSeverity(severity);
+    let channels = chIn ?? channelsForSeverity(severity);
+
+    // Preference Filter — only when the intended channels include an external
+    // (opt-in) channel. Low/medium in-app notifications skip this entirely, so the
+    // common path pays no extra query.
+    if (channels.includes('whatsapp') || channels.includes('push')) {
+      channels = await this.dispatcher.route(base.tenantId, base.userId ?? null, severity, channels);
+    }
     const row = { ...base, severity, channels };
 
     if (dedupeWindowMs && dedupeWindowMs > 0) {
@@ -67,7 +76,15 @@ export class NotificationService {
       if (existing) return existing;
     }
 
-    return this.repo.save(this.repo.create(row));
+    const saved = await this.repo.save(this.repo.create(row));
+
+    // Delivery Dispatcher — external side effects (WhatsApp) run after persistence,
+    // gated + idempotent + non-fatal. Fire-and-forget so create() stays fast.
+    if (saved.channels?.includes('whatsapp')) {
+      void this.dispatcher.dispatchExternal(saved);
+    }
+
+    return saved;
   }
 
   async findForUser(

@@ -186,7 +186,7 @@ export class DashboardService {
         count: nearExpiry,
         severity: nearExpiry > 0 ? 'warning' : 'info',
         iconKey: 'clock',
-        deepLink: '/pharmacy/ai-center?tab=tasks&task=expiry_clearance',
+        deepLink: '/pharmacy/ai-center?tab=tasks&domain=inventory&state=open',
         emptyMessageAr: 'لا توجد دفعات قريبة الانتهاء',
       },
       {
@@ -222,7 +222,7 @@ export class DashboardService {
               ? 'info'
               : 'success',
         iconKey: 'inbox',
-        deepLink: '/pharmacy/ai-center/approvals',
+        deepLink: '/pharmacy/ai-center?tab=approvals',
         emptyMessageAr: 'لا توجد مهام بانتظار اتخاذ قرار',
       },
     ];

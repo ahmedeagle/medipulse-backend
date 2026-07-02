@@ -197,7 +197,7 @@ export class FinancialService {
           `
           SELECT COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS total_value
           FROM inventory_items i
-          WHERE i."tenantId" = $1
+          WHERE i."pharmacyTenantId" = $1
             AND i.quantity > 0
             AND i."deletedAt" IS NULL
           `,
@@ -211,14 +211,14 @@ export class FinancialService {
             COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS dead_value,
             COUNT(DISTINCT i."productId")::text                              AS dead_skus
           FROM inventory_items i
-          WHERE i."tenantId" = $1
+          WHERE i."pharmacyTenantId" = $1
             AND i.quantity > 0
             AND i."deletedAt" IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM pos_transaction_items ti
               JOIN pos_transactions tx ON tx.id = ti."transactionId"
               WHERE ti."productId"        = i."productId"
-                AND tx."pharmacyTenantId" = i."tenantId"
+                AND tx."pharmacyTenantId" = i."pharmacyTenantId"
                 AND tx.status             = 'completed'
                 AND tx.type               = 'sale'
                 AND tx."createdAt"        >= $2
@@ -234,7 +234,7 @@ export class FinancialService {
             COALESCE(SUM(i.quantity * COALESCE(i."costPrice", 0)), 0)::text AS near_expiry_value,
             COUNT(DISTINCT i."productId")::text                              AS near_expiry_skus
           FROM inventory_items i
-          WHERE i."tenantId" = $1
+          WHERE i."pharmacyTenantId" = $1
             AND i.quantity > 0
             AND i."deletedAt" IS NULL
             AND i."expiryDate" IS NOT NULL

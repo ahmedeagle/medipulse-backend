@@ -35,6 +35,17 @@ export class DeadStockExecutor {
     if (approval.subjectType !== 'dead_stock_clearance') return;
 
     const p = (approval.payload ?? {}) as DeadStockPayload;
+
+    // Recovery routing: deeply-dormant, high-value stock is best recovered by
+    // returning it to the supplier for credit (near-full cost back), not by a
+    // discounted P2P sale. Honor the engine's recommendation instead of always
+    // listing on the marketplace. The realized recovery is recorded when the
+    // pharmacist confirms the supplier return (PURCHASE_EVENTS.RETURN_CONFIRMED).
+    if (p.recommendedAction === 'return_to_supplier') {
+      await this.routeToSupplierReturn(approval, p);
+      return;
+    }
+
     this.logger.log(
       `DeadStockExecutor: listing ${p.quantity} units of "${p.productName}" ` +
       `at ${p.suggestedDiscountPct}% discount (approval ${approval.id})`,
@@ -150,6 +161,39 @@ export class DeadStockExecutor {
           executedAt: new Date().toISOString(),
         });
       } catch { /* state machine race */ }
+    }
+  }
+
+  /**
+   * Supplier-return route: guide the pharmacist to record a return so the cost is
+   * credited back. We don't project a recovery here (the return isn't confirmed
+   * yet) — realized recovery is booked on RETURN_CONFIRMED to keep the ledger honest.
+   */
+  private async routeToSupplierReturn(approval: Approval, p: DeadStockPayload): Promise<void> {
+    try {
+      const estCredit = Math.round((Number(p.costPrice) || 0) * Number(p.quantity));
+      await this.approvals.markExecuted(approval.tenantId, approval.id, {
+        routedTo:     'supplier_return',
+        reason:       'return_to_supplier_recommended',
+        estCreditEgp: estCredit,
+        executedAt:   new Date().toISOString(),
+      });
+      await this.notifications.create({
+        tenantId:    approval.tenantId,
+        type:        'dead_stock',
+        title:       `↩︎ الأفضل إرجاع "${p.productName}" للمورد لاسترداد قيمته`,
+        body:        estCredit > 0
+          ? `هذا المنتج راكد وقيمته المحتجزة مرتفعة (~${estCredit.toLocaleString()}). إرجاعه للمورد يسترد التكلفة كاملة تقريباً — أنشئ مرتجع شراء الآن. يُحتسب الاسترداد فعلياً عند تأكيد المرتجع.`
+          : `هذا المنتج راكد ويُفضّل إرجاعه للمورد لاسترداد قيمته. أنشئ مرتجع شراء الآن — يُحتسب الاسترداد فعلياً عند تأكيد المرتجع.`,
+        resourceRef: '/pharmacy/purchases/returns/create',
+      });
+      this.logger.log(
+        `DeadStockExecutor: routed approval ${approval.id} to supplier-return (est credit ${estCredit})`,
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `DeadStockExecutor: supplier-return routing failed for approval ${approval.id} — ${err.message}`,
+      );
     }
   }
 

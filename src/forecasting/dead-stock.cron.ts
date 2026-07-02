@@ -146,6 +146,19 @@ export class DeadStockCron {
       analysis.urgencyScore >= 80 ? 'high'     : 'medium';
 
     const weeks = analysis.weeksWithoutMovement;
+    const isReturn = analysis.recommendedAction === 'return_to_supplier';
+    const estCredit = Math.round(costPrice * analysis.currentQuantity);
+
+    const rationale = isReturn
+      ? `المنتج محلَّل بالذكاء الاصطناعي: احتمال ركوده ${Math.round(analysis.deadStockProbability * 100)}%، ` +
+        `وقيمته المحتجزة مرتفعة (~${estCredit.toLocaleString()}). ` +
+        `الأفضل لاسترداد قيمته هو إرجاعه للمورد للحصول على رصيد بالتكلفة كاملة تقريباً بدلاً من بيعه بخصم. ` +
+        `عند الموافقة سيوجّهك النظام لإنشاء مرتجع شراء، ويُحتسب الاسترداد فعلياً عند تأكيد المرتجع. ` +
+        `الإدراج في سوق التبادل (P2P) يبقى بديلاً إن تعذّر الإرجاع.`
+      : `المنتج محلَّل بالذكاء الاصطناعي: احتمال ركوده ${Math.round(analysis.deadStockProbability * 100)}%. ` +
+        `بدلاً من شطبه وخسارة قيمته بالكامل، يقترح النظام استرداد جزء من قيمته: ` +
+        `عند الموافقة سيُدرج في سوق التبادل (P2P) بخصم ${suggestedDiscountPct}% وتصل إشعارات للصيدليات القريبة المهتمة. ` +
+        `الشطب أو الإرجاع للمورد يبقى خياراً يدوياً أخيراً إن لم يُبَع.`;
 
     await this.approvals.create(tenantId, {
       agentCode:        'dead_stock_expert',
@@ -155,12 +168,10 @@ export class DeadStockCron {
       // expiry_liquidation task for the same product (unique open-needKey index).
       needKey:          `deadstock::${analysis.productId}`,
       title:            `مخزون راكد: ${analysis.productName}`,
-      summary:          `${analysis.currentQuantity} وحدة لم تتحرك منذ ${weeks} أسبوع — نسبة الخطر ${Math.round(analysis.deadStockProbability * 100)}%`,
-      rationale:
-        `المنتج محلَّل بالذكاء الاصطناعي: احتمال ركوده ${Math.round(analysis.deadStockProbability * 100)}%. ` +
-        `بدلاً من شطبه وخسارة قيمته بالكامل، يقترح النظام استرداد جزء من قيمته: ` +
-        `عند الموافقة سيُدرج في سوق التبادل (P2P) بخصم ${suggestedDiscountPct}% وتصل إشعارات للصيدليات القريبة المهتمة. ` +
-        `الشطب أو الإرجاع للمورد يبقى خياراً يدوياً أخيراً إن لم يُبَع.`,
+      summary:          isReturn
+        ? `${analysis.currentQuantity} وحدة لم تتحرك منذ ${weeks} أسبوع — يُنصح بإرجاعها للمورد لاسترداد ~${estCredit.toLocaleString()}`
+        : `${analysis.currentQuantity} وحدة لم تتحرك منذ ${weeks} أسبوع — نسبة الخطر ${Math.round(analysis.deadStockProbability * 100)}%`,
+      rationale,
       confidence:       analysis.deadStockProbability,
       confidenceReason: analysis.actionReason,
       priority,

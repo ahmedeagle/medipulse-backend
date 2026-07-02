@@ -142,9 +142,10 @@ export class DeadStockCron {
       title:            `مخزون راكد: ${analysis.productName}`,
       summary:          `${analysis.currentQuantity} وحدة لم تتحرك منذ ${weeks} أسبوع — نسبة الخطر ${Math.round(analysis.deadStockProbability * 100)}%`,
       rationale:
-        `المنتج محلل بالذكاء الاصطناعي: احتمال تحوّله لمخزون ميت ${Math.round(analysis.deadStockProbability * 100)}%. ` +
-        `الإجراء الموصى به: ${this.actionLabel(analysis.recommendedAction)}. ` +
-        `عند الموافقة سيُدرج في سوق التبادل بخصم ${suggestedDiscountPct}%.`,
+        `المنتج محلَّل بالذكاء الاصطناعي: احتمال ركوده ${Math.round(analysis.deadStockProbability * 100)}%. ` +
+        `بدلاً من شطبه وخسارة قيمته بالكامل، يقترح النظام استرداد جزء من قيمته: ` +
+        `عند الموافقة سيُدرج في سوق التبادل (P2P) بخصم ${suggestedDiscountPct}% وتصل إشعارات للصيدليات القريبة المهتمة. ` +
+        `الشطب أو الإرجاع للمورد يبقى خياراً يدوياً أخيراً إن لم يُبَع.`,
       confidence:       analysis.deadStockProbability,
       confidenceReason: analysis.actionReason,
       priority,

@@ -25,6 +25,7 @@ import {
   PaginatedResult,
   PaginationQueryDto,
 } from '../common/pagination/pagination-query.dto';
+import { MOVEMENT_POLICY } from './movement-policy';
 
 @Injectable()
 export class InventoryService {
@@ -71,7 +72,97 @@ export class InventoryService {
       .take(limit)
       .skip(offset)
       .getManyAndCount();
-    return { data, total, limit, offset };
+
+    const enriched = await this.attachMovementSignals(tenantId, data);
+    return { data: enriched as InventoryItem[], total, limit, offset };
+  }
+
+  /**
+   * Attach movement/dead-stock signals in one aggregated query for the current page.
+   * This avoids per-item queries and keeps response time stable on large inventories.
+   */
+  private async attachMovementSignals(tenantId: string, items: InventoryItem[]): Promise<Array<InventoryItem & {
+    lastSoldAt?: string | null;
+    consumed8w?: number;
+    daysSinceLastSale?: number | null;
+    movementLabel?: 'active' | 'moderate' | 'stagnant';
+    deadStockFlag?: boolean;
+  }>> {
+    if (!items.length) return items as any;
+
+    const productIds = Array.from(new Set(items.map((i) => i.productId).filter(Boolean)));
+    if (!productIds.length) return items as any;
+
+    const rows: Array<{ productId: string; lastSoldWeek: string | null; consumed8w: string }> = await this.dataSource.query(
+      `
+      SELECT
+        cs."productId" AS "productId",
+        MAX(cs."weekStart") FILTER (WHERE cs."quantityConsumed" > 0) AS "lastSoldWeek",
+        COALESCE(
+          SUM(cs."quantityConsumed") FILTER (
+            WHERE cs."weekStart" >= (CURRENT_DATE - ($3::int * INTERVAL '1 day'))
+          ),
+          0
+        ) AS "consumed8w"
+      FROM consumption_snapshots cs
+      WHERE cs."tenantId" = $1
+        AND cs."productId" = ANY($2::uuid[])
+      GROUP BY cs."productId"
+      `,
+      [tenantId, productIds, MOVEMENT_POLICY.consumptionWindowDays],
+    );
+
+    const byProduct = new Map(
+      rows.map((r) => [r.productId, {
+        lastSoldWeek: r.lastSoldWeek ? new Date(r.lastSoldWeek) : null,
+        consumed8w: Number(r.consumed8w) || 0,
+      }]),
+    );
+
+    const now = Date.now();
+    return items.map((item) => {
+      const snap = byProduct.get(item.productId);
+      if (!snap) {
+        // No movement history yet (new product / no historical sales snapshots).
+        // Keep classification neutral to avoid false dead-stock positives.
+        return {
+          ...item,
+          lastSoldAt: null,
+          consumed8w: undefined,
+          daysSinceLastSale: null,
+          movementLabel: undefined,
+          deadStockFlag: false,
+        };
+      }
+
+      const lastSoldAt = snap.lastSoldWeek ? snap.lastSoldWeek.toISOString() : null;
+      const daysSinceLastSale = snap.lastSoldWeek
+        ? Math.max(0, Math.floor((now - snap.lastSoldWeek.getTime()) / 86_400_000))
+        : null;
+
+      const movementLabel: 'active' | 'moderate' | 'stagnant' =
+        daysSinceLastSale == null
+          ? 'moderate'
+          : daysSinceLastSale <= MOVEMENT_POLICY.activeDays
+            ? 'active'
+            : daysSinceLastSale <= MOVEMENT_POLICY.moderateDays
+              ? 'moderate'
+              : 'stagnant';
+
+      const deadStockFlag =
+        item.quantity > 0 &&
+        (daysSinceLastSale ?? 0) >= MOVEMENT_POLICY.deadStockDays &&
+        snap.consumed8w === 0;
+
+      return {
+        ...item,
+        lastSoldAt,
+        consumed8w: snap.consumed8w,
+        daysSinceLastSale,
+        movementLabel,
+        deadStockFlag,
+      };
+    });
   }
 
   async findLowStock(

@@ -23,6 +23,7 @@ import {
 import { NotificationService } from './notification.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { UpsertNotificationPreferencesDto } from './dto/upsert-notification-preferences.dto';
+import { isNotificationCategory } from './notification-category';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -49,6 +50,40 @@ export class NotificationController {
     @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
   ) {
     return this.svc.findForUser(user.tenantId, user.id, Math.min(limit, 100));
+  }
+
+  @Get('feed')
+  @ApiOperation({
+    summary: 'Notification Center feed — server-paginated + filtered by category/read state',
+    description:
+      'Filtering and pagination run in the database so the center scales to very large volumes. ' +
+      'Returns { data, total, limit, offset } for load-more / infinite scroll.',
+  })
+  @ApiQuery({ name: 'category', required: false, description: 'orders | p2p | purchases | inventory | system' })
+  @ApiQuery({ name: 'unread', required: false, description: 'true → only unread' })
+  @ApiQuery({ name: 'limit', required: false, schema: { default: 25, maximum: 50 } })
+  @ApiQuery({ name: 'offset', required: false, schema: { default: 0 } })
+  @ApiOkResponse({ description: '{ data, total, limit, offset }' })
+  feed(
+    @CurrentUser() user: any,
+    @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+    @Query('category') category?: string,
+    @Query('unread') unread?: string,
+  ) {
+    return this.svc.findPage(user.tenantId, user.id, {
+      category: category && isNotificationCategory(category) ? category : undefined,
+      unreadOnly: unread === 'true' || unread === '1',
+      limit,
+      offset,
+    });
+  }
+
+  @Get('counts')
+  @ApiOperation({ summary: 'Per-category totals + unread counts for the Notification Center tabs' })
+  @ApiOkResponse({ description: '{ total, unread, categories: { [category]: { total, unread } } }' })
+  counts(@CurrentUser() user: any) {
+    return this.svc.getCategoryCounts(user.tenantId, user.id);
   }
 
   @Get('unread-count')

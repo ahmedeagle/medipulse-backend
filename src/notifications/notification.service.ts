@@ -8,6 +8,11 @@ import {
   severityForType,
   channelsForSeverity,
 } from './notification-policy';
+import {
+  NotificationCategory,
+  ALL_CATEGORIES,
+  typesForCategory,
+} from './notification-category';
 import { NotificationDispatcherService } from './notification-dispatcher.service';
 
 export interface CreateNotificationDto {
@@ -100,6 +105,94 @@ export class NotificationService {
       .take(limit)
       .getMany();
   }
+
+  /**
+   * Paginated + filtered feed for the Notification Center. Category and read
+   * state are filtered in the database (indexed on tenantId/userId/isRead/
+   * createdAt) so it stays fast even with very large notification volumes —
+   * we never load the full table into memory. Returns a bounded page plus the
+   * matching total so the client can drive "load more".
+   */
+  async findPage(
+    tenantId: string,
+    userId: string,
+    opts: {
+      category?: NotificationCategory;
+      unreadOnly?: boolean;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<{ data: Notification[]; total: number; limit: number; offset: number }> {
+    const limit = Math.min(Math.max(opts.limit ?? 25, 1), 50);
+    const offset = Math.max(opts.offset ?? 0, 0);
+
+    const qb = this.repo
+      .createQueryBuilder('n')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('(n.userId = :userId OR n.userId IS NULL)', { userId });
+
+    if (opts.unreadOnly) qb.andWhere('n.isRead = false');
+
+    if (opts.category) {
+      const types = typesForCategory(opts.category);
+      if (types.length) qb.andWhere('n.type IN (:...types)', { types });
+      else qb.andWhere('1 = 0');
+    }
+
+    const [data, total] = await qb
+      .orderBy('n.createdAt', 'DESC')
+      .take(limit)
+      .skip(offset)
+      .getManyAndCount();
+
+    return { data, total, limit, offset };
+  }
+
+  /**
+   * Per-category totals + unread counts in a single grouped query, so the
+   * center's tab badges never require scanning every row on the client.
+   */
+  async getCategoryCounts(
+    tenantId: string,
+    userId: string,
+  ): Promise<{
+    total: number;
+    unread: number;
+    categories: Record<NotificationCategory, { total: number; unread: number }>;
+  }> {
+    const rows: Array<{ type: string; total: string; unread: string }> = await this.repo
+      .createQueryBuilder('n')
+      .select('n.type', 'type')
+      .addSelect('COUNT(*)', 'total')
+      .addSelect('COUNT(*) FILTER (WHERE n.isRead = false)', 'unread')
+      .where('n.tenantId = :tenantId', { tenantId })
+      .andWhere('(n.userId = :userId OR n.userId IS NULL)', { userId })
+      .groupBy('n.type')
+      .getRawMany();
+
+    const categories = ALL_CATEGORIES.reduce((acc, c) => {
+      acc[c] = { total: 0, unread: 0 };
+      return acc;
+    }, {} as Record<NotificationCategory, { total: number; unread: number }>);
+
+    let total = 0;
+    let unread = 0;
+
+    for (const r of rows) {
+      const t = Number(r.total) || 0;
+      const u = Number(r.unread) || 0;
+      total += t;
+      unread += u;
+      const cat = ALL_CATEGORIES.find((c) => typesForCategory(c).includes(r.type as any));
+      if (cat) {
+        categories[cat].total += t;
+        categories[cat].unread += u;
+      }
+    }
+
+    return { total, unread, categories };
+  }
+
 
   async getUnreadCount(tenantId: string, userId: string): Promise<number> {
     return this.repo

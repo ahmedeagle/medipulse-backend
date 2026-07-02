@@ -4,6 +4,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { DataSource } from 'typeorm';
 import { NotificationService } from '../notifications/notification.service';
 import { EVENTS } from '../events/domain-events';
+import { MOVEMENT_POLICY } from './movement-policy';
 
 interface StockoutRow {
   pharmacyTenantId: string;
@@ -60,29 +61,45 @@ export class LostRevenueCron {
           WHERE s."weekStart" >= NOW() - INTERVAL '30 days'
           GROUP BY s."tenantId", s."productId"
           HAVING SUM(s."quantityConsumed") > 0
+        ),
+        movement AS (
+          SELECT
+            s."tenantId",
+            s."productId",
+            MAX(s."weekStart") FILTER (WHERE s."quantityConsumed" > 0) AS last_sold_week
+          FROM consumption_snapshots s
+          WHERE s."weekStart" >= NOW() - ($1::int * INTERVAL '1 day')
+          GROUP BY s."tenantId", s."productId"
         )
         SELECT
           i."pharmacyTenantId",
           COALESCE(p."nameAr", p.name, 'منتج غير مسمى')                AS product_name_ar,
           COALESCE(i."sellingPrice"::numeric, 0)                        AS selling_price,
           d.avg_daily_units,
-          GREATEST(1, EXTRACT(DAYS FROM NOW() - i."updatedAt"))::int    AS days_at_zero,
+          GREATEST(
+            1,
+            COALESCE(EXTRACT(DAYS FROM NOW() - m.last_sold_week), 1)
+          )::int                                                         AS days_at_zero,
           ROUND((d.avg_daily_units * COALESCE(i."sellingPrice"::numeric, 0))::numeric, 2)
                                                                         AS daily_lost_egp,
           ROUND((
             d.avg_daily_units
             * COALESCE(i."sellingPrice"::numeric, 0)
-            * GREATEST(1, EXTRACT(DAYS FROM NOW() - i."updatedAt"))
+            * GREATEST(
+                1,
+                COALESCE(EXTRACT(DAYS FROM NOW() - m.last_sold_week), 1)
+              )
           )::numeric, 2)                                                AS total_lost_egp
         FROM inventory_items i
         JOIN demand d ON d."tenantId" = i."pharmacyTenantId"
                      AND d."productId" = i."productId"
+        LEFT JOIN movement m ON m."tenantId" = i."pharmacyTenantId"
+                            AND m."productId" = i."productId"
         LEFT JOIN products p ON p.id = i."productId"
         WHERE i."deletedAt" IS NULL
           AND i.quantity = 0
-          AND i."updatedAt" <= NOW() - INTERVAL '2 hours'
         ORDER BY i."pharmacyTenantId", (d.avg_daily_units * COALESCE(i."sellingPrice"::numeric, 0)) DESC
-      `);
+      `, [MOVEMENT_POLICY.movementLookbackDays]);
     } catch (err: any) {
       this.logger.error(`LostRevenueCron digest failed: ${err.message}`);
       return;

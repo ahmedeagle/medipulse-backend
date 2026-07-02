@@ -25,11 +25,20 @@ export interface RecordRecoveryDto {
 
 export interface RecoverySummary {
   since: string;
-  realizedEgp: number;   // money actually captured
-  pipelineEgp: number;   // projected recovery not yet realized
-  lostEgp: number;       // projected recovery that closed unrecovered (lost/expired)
+  realizedEgp: number;     // money actually captured
+  pipelineEgp: number;     // projected recovery still in progress (EXCLUDES protective avoided-loss)
+  lostEgp: number;         // projected recovery that closed unrecovered (lost/expired)
+  avoidedLossEgp: number;  // protective margin (stockout_avoided) — NOT recoverable cash, operational impact only
   byType: Array<{ type: RecoveryEventType; realizedEgp: number; pipelineEgp: number; lostEgp: number; count: number }>;
 }
+
+/**
+ * Protective / avoided-loss recovery types. These represent loss that was
+ * *prevented* (e.g. a stockout that never happened), not capital awaiting a sale.
+ * They must never inflate the recovery pipeline or investor-facing "recoverable
+ * value" — they live only under an explicitly-labelled "value protection" bucket.
+ */
+const PROTECTIVE_TYPES: RecoveryEventType[] = ['stockout_avoided'];
 
 @Injectable()
 export class RecoveryEventService {
@@ -195,17 +204,23 @@ export class RecoveryEventService {
     let realizedEgp = 0;
     let pipelineEgp = 0;
     let lostEgp = 0;
+    let avoidedLossEgp = 0;
     const byType = rows.map((r) => {
       const realized = Number(r.realized);
       const pipeline = Number(r.pipeline);
       const lost = Number(r.lost);
       realizedEgp += realized;
-      pipelineEgp += pipeline;
       lostEgp += lost;
+      // Protective avoided-loss never enters the recovery pipeline total.
+      if (PROTECTIVE_TYPES.includes(r.type)) {
+        avoidedLossEgp += pipeline;
+      } else {
+        pipelineEgp += pipeline;
+      }
       return { type: r.type, realizedEgp: realized, pipelineEgp: pipeline, lostEgp: lost, count: Number(r.count) };
     });
 
-    return { since: since.toISOString(), realizedEgp, pipelineEgp, lostEgp, byType };
+    return { since: since.toISOString(), realizedEgp, pipelineEgp, lostEgp, avoidedLossEgp, byType };
   }
 
   /**

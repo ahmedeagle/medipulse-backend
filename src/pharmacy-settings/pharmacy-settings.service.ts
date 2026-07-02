@@ -68,6 +68,9 @@ export class PharmacySettingsService {
       inventorySettings: dto.inventorySettings
         ? { ...existing.inventorySettings, ...dto.inventorySettings }
         : existing.inventorySettings,
+      aiAnalysisSettings: dto.aiAnalysisSettings
+        ? { ...(existing.aiAnalysisSettings ?? {}), ...dto.aiAnalysisSettings }
+        : existing.aiAnalysisSettings,
       notificationSettings: dto.notificationSettings
         ? { ...(existing.notificationSettings ?? {}), ...dto.notificationSettings }
         : existing.notificationSettings,

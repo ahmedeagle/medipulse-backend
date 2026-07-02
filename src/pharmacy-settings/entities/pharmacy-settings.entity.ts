@@ -68,6 +68,22 @@ export interface AiAnalysisSettings {
    * for GCC + Egypt B2B pharma).
    */
   overpaymentThresholdPct?: number;
+
+  // ── Dead-stock engine thresholds (configurable; fall back to code defaults) ──
+  /** Classifier cutoff P(dead) to flag an item. Default: 0.70 */
+  deadStockProbabilityThreshold?: number;
+  /** Min urgency score (0–100) for the daily cron to create an approval task. Default: 70 */
+  deadStockUrgencyTaskThreshold?: number;
+  /** Urgency score at/above which the deeper discount applies. Default: 90 */
+  deadStockHighUrgencyScore?: number;
+  /** Suggested P2P clearance discount for normal dead stock. Default: 25 */
+  deadStockDiscountPct?: number;
+  /** Suggested P2P clearance discount for high-urgency dead stock. Default: 40 */
+  deadStockHighDiscountPct?: number;
+  /** Weeks without movement before a markdown is recommended. Default: 12 */
+  deadStockDormancyWeeksMarkdown?: number;
+  /** Weeks without movement (with high locked value) before supplier-return. Default: 16 */
+  deadStockDormancyWeeksReturn?: number;
 }
 
 export interface NotificationSettings {

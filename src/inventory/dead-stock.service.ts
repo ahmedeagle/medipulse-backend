@@ -5,6 +5,19 @@ import { PriceSnapshot } from '../analytics/entities/price-snapshot.entity';
 
 export type LiquidationAction = 'return_to_supplier' | 'markdown' | 'write_off' | 'monitor';
 
+/** Configurable dead-stock thresholds (from pharmacy settings; fall back to defaults). */
+export interface DeadStockConfig {
+  probabilityThreshold: number;   // classifier cutoff (default 0.70)
+  dormancyWeeksMarkdown: number;  // weeks → markdown (default 12)
+  dormancyWeeksReturn: number;    // weeks → supplier-return (default 16)
+}
+
+export const DEAD_STOCK_DEFAULTS: DeadStockConfig = {
+  probabilityThreshold: 0.70,
+  dormancyWeeksMarkdown: 12,
+  dormancyWeeksReturn: 16,
+};
+
 export interface DeadStockAnalysis {
   productId:              string;
   productName:            string;
@@ -50,7 +63,7 @@ export class DeadStockService {
     private readonly dataSource: DataSource,
   ) {}
 
-  async analyzeDeadStock(tenantId: string): Promise<DeadStockAnalysis[]> {
+  async analyzeDeadStock(tenantId: string, cfg: DeadStockConfig = DEAD_STOCK_DEFAULTS): Promise<DeadStockAnalysis[]> {
     // Fetch products with consumption snapshots (need velocity features for classifier)
     const dormantProducts: Array<{
       productId:    string;
@@ -116,8 +129,8 @@ export class DeadStockService {
           : parseInt(row.snapshotCount, 10),
       });
 
-      // Only surface as dead stock if probability > 0.70
-      if (probability < 0.70) continue;
+      // Only surface as dead stock if probability exceeds the (configurable) cutoff
+      if (probability < cfg.probabilityThreshold) continue;
 
       const estimatedValue = await this.estimateValue(row.productId, row.quantity);
       const daysToExpiry   = row.expiryDate
@@ -135,7 +148,7 @@ export class DeadStockService {
         expiryRisk,
         estimatedValue,
         weeksWithoutMovement,
-      });
+      }, cfg);
 
       const classifierConfidence: 'high' | 'medium' | 'low' =
         probability >= 0.90 ? 'high' : probability >= 0.80 ? 'medium' : 'low';
@@ -233,7 +246,7 @@ export class DeadStockService {
     expiryRisk:           'critical' | 'high' | 'none';
     estimatedValue:       number;
     weeksWithoutMovement: number;
-  }): { action: LiquidationAction; reason: string; urgencyScore: number } {
+  }, cfg: DeadStockConfig = DEAD_STOCK_DEFAULTS): { action: LiquidationAction; reason: string; urgencyScore: number } {
     const { daysToExpiry, expiryRisk, estimatedValue, weeksWithoutMovement } = params;
 
     if (expiryRisk === 'critical') {
@@ -252,7 +265,7 @@ export class DeadStockService {
       };
     }
 
-    if (weeksWithoutMovement >= 16 && estimatedValue >= 1000) {
+    if (weeksWithoutMovement >= cfg.dormancyWeeksReturn && estimatedValue >= 1000) {
       return {
         action:       'return_to_supplier',
         reason:       `${weeksWithoutMovement} weeks without movement. SAR ${estimatedValue.toFixed(0)} locked in slow-moving inventory. Request return authorization.`,
@@ -260,7 +273,7 @@ export class DeadStockService {
       };
     }
 
-    if (weeksWithoutMovement >= 12) {
+    if (weeksWithoutMovement >= cfg.dormancyWeeksMarkdown) {
       return {
         action:       'markdown',
         reason:       `${weeksWithoutMovement} weeks without movement. A price reduction or bundled offer may accelerate turnover.`,

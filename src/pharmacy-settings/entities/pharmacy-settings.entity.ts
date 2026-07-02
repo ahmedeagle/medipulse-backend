@@ -84,7 +84,9 @@ export interface AiAnalysisSettings {
   deadStockDormancyWeeksMarkdown?: number;
   /** Weeks without movement (with high locked value) before supplier-return. Default: 16 */
   deadStockDormancyWeeksReturn?: number;
-}
+  // ── Low-stock engine ────────────────────────────────────────────────────────
+  /** Replenishment lead window (days) used to value avoided-stockout margin. Default: 14 */
+  stockoutLeadDays?: number;}
 
 export interface NotificationSettings {
   enableLowStockAlerts?:          boolean;

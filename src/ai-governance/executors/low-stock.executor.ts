@@ -153,7 +153,7 @@ export class LowStockExecutor {
     try {
       const [row] = await this.dataSource.query<Array<{
         consumed: string | null; weeks: string | null;
-        selling: string | null; cost: string | null;
+        selling: string | null; cost: string | null; lead_days: string | null;
       }>>(
         `SELECT
            (SELECT COALESCE(SUM(cs."quantityConsumed"), 0)
@@ -165,7 +165,9 @@ export class LowStockExecutor {
              WHERE cs."tenantId" = $1 AND cs."productId" = $2
                AND cs."weekStart" >= (CURRENT_DATE - INTERVAL '56 days'))            AS weeks,
            ii."sellingPrice" AS selling,
-           ii."costPrice"    AS cost
+           ii."costPrice"    AS cost,
+           (SELECT ("aiAnalysisSettings"->>'stockoutLeadDays')::int
+              FROM pharmacy_settings WHERE "pharmacyTenantId" = $1)                  AS lead_days
          FROM inventory_items ii
          WHERE ii.id = $3
          LIMIT 1`,
@@ -178,8 +180,9 @@ export class LowStockExecutor {
       const unitMargin = Math.max(Number(row.selling ?? 0) - Number(row.cost ?? 0), 0);
       if (weeks <= 0 || consumed <= 0 || unitMargin <= 0) return; // no real basis → skip
 
+      const leadDays = Number(row.lead_days) > 0 ? Number(row.lead_days) : STOCKOUT_LEAD_DAYS;
       const avgDailyUnits = consumed / (weeks * 7);
-      const expectedValueEgp = Math.round(avgDailyUnits * STOCKOUT_LEAD_DAYS * unitMargin * 100) / 100;
+      const expectedValueEgp = Math.round(avgDailyUnits * leadDays * unitMargin * 100) / 100;
       if (!(expectedValueEgp > 0)) return;
 
       await this.recovery.record({
@@ -194,7 +197,7 @@ export class LowStockExecutor {
         metadata: {
           action,
           avgDailyUnits: Math.round(avgDailyUnits * 100) / 100,
-          leadDays: STOCKOUT_LEAD_DAYS,
+          leadDays,
           unitMargin: Math.round(unitMargin * 100) / 100,
         },
       });

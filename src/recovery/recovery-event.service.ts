@@ -27,7 +27,8 @@ export interface RecoverySummary {
   since: string;
   realizedEgp: number;   // money actually captured
   pipelineEgp: number;   // projected recovery not yet realized
-  byType: Array<{ type: RecoveryEventType; realizedEgp: number; pipelineEgp: number; count: number }>;
+  lostEgp: number;       // projected recovery that closed unrecovered (lost/expired)
+  byType: Array<{ type: RecoveryEventType; realizedEgp: number; pipelineEgp: number; lostEgp: number; count: number }>;
 }
 
 @Injectable()
@@ -184,22 +185,55 @@ export class RecoveryEventService {
       .select('e.type', 'type')
       .addSelect(`COALESCE(SUM(CASE WHEN e.status = 'realized' THEN e."amountEgp" ELSE 0 END), 0)`, 'realized')
       .addSelect(`COALESCE(SUM(CASE WHEN e.status = 'projected' THEN COALESCE(e."expectedValueEgp", 0) ELSE 0 END), 0)`, 'pipeline')
+      .addSelect(`COALESCE(SUM(CASE WHEN e.status IN ('lost','expired') THEN COALESCE(e."expectedValueEgp", 0) ELSE 0 END), 0)`, 'lost')
       .addSelect('COUNT(*)', 'count')
       .where('e.pharmacyTenantId = :tenantId', { tenantId })
       .andWhere('e.createdAt >= :since', { since })
       .groupBy('e.type')
-      .getRawMany<{ type: RecoveryEventType; realized: string; pipeline: string; count: string }>();
+      .getRawMany<{ type: RecoveryEventType; realized: string; pipeline: string; lost: string; count: string }>();
 
     let realizedEgp = 0;
     let pipelineEgp = 0;
+    let lostEgp = 0;
     const byType = rows.map((r) => {
       const realized = Number(r.realized);
       const pipeline = Number(r.pipeline);
+      const lost = Number(r.lost);
       realizedEgp += realized;
       pipelineEgp += pipeline;
-      return { type: r.type, realizedEgp: realized, pipelineEgp: pipeline, count: Number(r.count) };
+      lostEgp += lost;
+      return { type: r.type, realizedEgp: realized, pipelineEgp: pipeline, lostEgp: lost, count: Number(r.count) };
     });
 
-    return { since: since.toISOString(), realizedEgp, pipelineEgp, byType };
+    return { since: since.toISOString(), realizedEgp, pipelineEgp, lostEgp, byType };
+  }
+
+  /**
+   * Close the failure side of the loop (PRD v1.2): projected recoveries whose P2P
+   * listing expired unsold are marked terminal so pipeline never inflates forever.
+   *   • deadstock_recovered → 'lost'  (dead capital not recovered)
+   *   • expiry_avoided     → 'expired' (near-expiry stock that lapsed unsold)
+   * stockout_avoided stays projected by design (protective, never "sold").
+   * One global indexed UPDATE per type — safe at scale, idempotent (re-runs no-op).
+   */
+  async reconcileStaleProjections(): Promise<{ lost: number; expired: number }> {
+    const lostRes = await this.dataSource.query(
+      `UPDATE ai_recovery_events e SET status = 'lost'
+         WHERE e.status = 'projected'
+           AND e.type = 'deadstock_recovered'
+           AND e.metadata->>'listingId' IN (SELECT id::text FROM p2p_listings WHERE status = 'expired')`,
+    );
+    const expiredRes = await this.dataSource.query(
+      `UPDATE ai_recovery_events e SET status = 'expired'
+         WHERE e.status = 'projected'
+           AND e.type = 'expiry_avoided'
+           AND e.metadata->>'listingId' IN (SELECT id::text FROM p2p_listings WHERE status = 'expired')`,
+    );
+    const lost = Array.isArray(lostRes) ? (lostRes[1] ?? 0) : 0;
+    const expired = Array.isArray(expiredRes) ? (expiredRes[1] ?? 0) : 0;
+    if (lost || expired) {
+      this.logger.log(`recovery reconcile: ${lost} lost, ${expired} expired`);
+    }
+    return { lost, expired };
   }
 }

@@ -11,7 +11,7 @@ export type RecoveryEventType =
   | 'stockout_avoided'     // reorder executed before stockout (projected)
   | 'return_recovery';     // value recovered via supplier return
 
-export type RecoveryEventStatus = 'projected' | 'realized';
+export type RecoveryEventStatus = 'projected' | 'realized' | 'lost' | 'expired';
 export type RecoverySourceType = 'approval' | 'order' | 'cron' | 'agent' | 'return';
 
 /**

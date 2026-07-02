@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { RecoveryEvent } from './entities/recovery-event.entity';
 import { RecoveryEventService } from './recovery-event.service';
 import { RecoveryFinalizationListener } from './recovery-finalization.listener';
+import { RecoveryReconciliationCron } from './recovery-reconciliation.cron';
+import { RecoveryController } from './recovery.controller';
 
 /**
  * Financial Impact Measurement layer. Exported so executors (procurement,
@@ -11,7 +13,8 @@ import { RecoveryFinalizationListener } from './recovery-finalization.listener';
  */
 @Module({
   imports: [TypeOrmModule.forFeature([RecoveryEvent])],
-  providers: [RecoveryEventService, RecoveryFinalizationListener],
+  controllers: [RecoveryController],
+  providers: [RecoveryEventService, RecoveryFinalizationListener, RecoveryReconciliationCron],
   exports: [RecoveryEventService],
 })
 export class RecoveryModule {}

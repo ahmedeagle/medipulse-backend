@@ -146,6 +146,11 @@ export class P2pOrderMonitorCron {
       agentCode:       'p2p_monitor',
       subjectType:     'p2p_order_action',
       subjectId:       row.id,
+      // One open task per order (scoped per tenant) — routes through the
+      // uniq_approvals_open_need guard so concurrent cron ticks or a second
+      // running backend instance can never create duplicate cards for the
+      // same order. Without this, p2p_order_action bypassed the dedup entirely.
+      needKey:         `p2p_order::${row.id}`,
       title:           cfg.title(row),
       summary:         cfg.summary(row),
       rationale:       cfg.rationale(row),
@@ -166,6 +171,11 @@ export class P2pOrderMonitorCron {
         title:       cfg.title(row),
         body:        cfg.summary(row),
         resourceRef: `p2p_order:${row.id}`,
+        // Collapse duplicate reminders for the same order within ~20h, so a
+        // race (or a second running instance) can't double-notify; the daily
+        // (24h) escalation still comes through.
+        dedupeWindowMs: 20 * 3600 * 1000,
+        dedupeBy:       'resourceRef',
       });
     }
   }

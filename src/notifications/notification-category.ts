@@ -30,6 +30,7 @@ export const CATEGORY_TYPES: Record<NotificationCategory, NotificationType[]> = 
     'p2p_order_shipped',
     'p2p_order_disputed',
     'p2p_invoice_ready',
+    'p2p_listing_created',
     'p2p_profile_submitted',
     'p2p_profile_verified',
     'p2p_profile_rejected',

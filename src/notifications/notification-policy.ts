@@ -45,6 +45,7 @@ const SEVERITY_BY_TYPE: Partial<Record<NotificationType, NotificationSeverity>> 
   procurement_delay_suggested:'medium',
   p2p_opportunity:            'medium',
   p2p_pool_opportunity:       'medium',
+  p2p_listing_created:        'medium',
 
   // low — purely informational
   system:                     'low',

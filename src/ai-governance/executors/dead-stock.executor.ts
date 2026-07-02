@@ -130,6 +130,15 @@ export class DeadStockExecutor {
         discountPct: p.suggestedDiscountPct,
         executedAt:  new Date().toISOString(),
       });
+
+      // Seller confirmation — keep the user informed the item is now live, with a deep link.
+      await this.notifications.create({
+        tenantId:    approval.tenantId,
+        type:        'p2p_listing_created',
+        title:       `✓ تم إدراج "${p.productName}" للبيع في سوق التبادل`,
+        body:        `تم نشر ${p.quantity} وحدة بخصم ${p.suggestedDiscountPct}%، ووصل إشعار للصيدليات القريبة المهتمة. تابع عرضك من صفحة السوق.`,
+        resourceRef: '/pharmacy/p2p?tab=sell',
+      });
     } catch (err: any) {
       this.logger.error(
         `DeadStockExecutor: failed for approval ${approval.id} — ${err.message}`,

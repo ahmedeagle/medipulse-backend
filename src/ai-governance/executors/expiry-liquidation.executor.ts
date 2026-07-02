@@ -117,6 +117,15 @@ export class ExpiryLiquidationExecutor {
         executedAt:  new Date().toISOString(),
       });
 
+      // Seller confirmation — keep the user informed the item is now live, with a deep link.
+      await this.notifications.create({
+        tenantId:    approval.tenantId,
+        type:        'p2p_listing_created',
+        title:       `✓ تم إدراج "${p.productName}" للبيع في سوق التبادل`,
+        body:        `تم نشر ${p.quantity} وحدة بخصم ${p.discountPct}% قبل انتهاء الصلاحية، ووصل إشعار للصيدليات القريبة المهتمة. تابع عرضك من صفحة السوق.`,
+        resourceRef: '/pharmacy/p2p?tab=sell',
+      });
+
       // Measurement layer: near-expiry stock now being recovered. Projected until
       // the P2P listing actually sells (realized on order completion, future wiring).
       await this.recovery.record({
